@@ -1,0 +1,19 @@
+# Ansible controller state kept IN-TREE on purpose -- see the header of ansible.cfg.
+# These three are the isolation mechanism, not build noise.
+.venv/
+.collections/
+.ansible-tmp/
+*.retry
+
+# GAME DATA IS NEVER COMMITTED. This repo is public; Quake III Arena's pak0.pk3 is
+# retail data that id Software never licensed for redistribution. pak1..pak8 come from
+# the freely-redistributable 1.32 point release, but they are blocked too -- one rule is
+# easier to keep than two, and nothing here needs them in git.
+*.pk3
+baseq3/
+baseq3.zip
+
+# Anything with a password in it.
+secrets/
+*.vault
+vault-password

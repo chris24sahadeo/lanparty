@@ -1,0 +1,29 @@
+---
+# GAME MANIFEST -- the contract every game in this repo satisfies.
+#
+# site.yml reads exactly these keys and nothing else, so adding a game is: write one of
+# these, write the roles it names, set lanparty_game. Ports, firewall handling, service
+# naming and the LAN path check all come from the generic layer.
+game_id: quake3
+game_display_name: "Quake III Arena"
+
+# Role applied to server AND clients (engine, game data -- whatever both need).
+game_common_role: quake3_common
+# Role applied only to the single host in the game_server group.
+game_server_role: quake3_server
+# Role applied to every host in game_clients.
+game_client_role: quake3_client
+
+# Ports the GAME needs on the LAN. roles/game_host opens these -- but only if a firewall
+# is already running; see that role for why it never enables one.
+# 27960/udp is the Quake III server port. There is no TCP; idTech3 is UDP only.
+game_udp_ports:
+  - "{{ lanparty_quake3_port }}"
+game_tcp_ports: []
+
+# systemd unit name on the server, without the .service suffix.
+game_service_name: lanparty-quake3
+
+# True when the game needs data the repo cannot ship. Makes roles/game_host print the
+# reminder rather than letting a run finish looking successful with nothing playable.
+game_data_required: true

@@ -1,0 +1,157 @@
+---
+# PROVE THAT GAMEPLAY TRAFFIC STAYS ON THE LAN.
+#
+# This is the role the whole repo is built around. Every machine here is on a Tailscale
+# tailnet, and reaching the game server by its tailnet address would "work" -- which is
+# the problem. Tailscale is WireGuard: even when two peers find a direct path over the
+# same switch, packets are encrypted, decrypted, and squeezed through a smaller MTU
+# (Maximum Transmission Unit) on the way. That cost lands on exactly the packets a
+# deathmatch cannot afford it on. Quake III's LAN server browser, which broadcasts on the
+# local segment, does not cross an overlay network at all.
+#
+# So the game binds and connects on the PHYSICAL LAN address, and this role checks -- per
+# machine, before anything is installed -- that the address really is what we think it is.
+#
+# WARN-ONLY BY DEFAULT (lanparty_preflight_strict: false). A first run happens while
+# machines are still being carried into the room; failing it then would just be noise.
+# Set the flag true on party morning to turn every finding into a hard stop.
+#
+# Nothing here changes anything: every task is a probe with changed_when: false.
+
+- name: Preflight -- identify the dedicated server
+  ansible.builtin.set_fact:
+    # Exactly one host is expected in game_server. Taking [0] rather than asserting the
+    # count keeps this role usable when someone is testing with -l on a single machine.
+    lanparty_server_host: "{{ groups['game_server'][0] }}"
+    lanparty_server_lan_ip: >-
+      {{ hostvars[groups['game_server'][0]]['lan_ip']
+         | default(hostvars[groups['game_server'][0]]['ansible_facts']['default_ipv4']['address']) }}
+
+- name: Preflight -- resolve the route this machine would use to reach the server
+  ansible.builtin.command:
+    argv: [ip, route, get, "{{ lanparty_server_lan_ip }}"]
+  register: lanparty_route
+  changed_when: false
+  failed_when: false
+
+- name: Preflight -- extract the egress interface and source address from that route
+  ansible.builtin.set_fact:
+    # `ip route get` prints e.g.
+    #   192.168.100.41 dev wlp170s0 src 192.168.100.236 uid 1000
+    # or, for the server talking to itself,
+    #   local 192.168.100.236 dev lo src 192.168.100.236 uid 1000
+    lanparty_route_dev: "{{ lanparty_route.stdout | regex_search('dev\\s+(\\S+)', '\\1') | first | default('') }}"
+    lanparty_route_src: "{{ lanparty_route.stdout | regex_search('src\\s+(\\S+)', '\\1') | first | default('') }}"
+
+- name: Preflight -- find the interface that actually owns this machine lan_ip
+  ansible.builtin.set_fact:
+    # NOT the same thing as the egress interface. When the server checks itself, the
+    # route to its own address is `dev lo` -- so testing the route would report loopback
+    # and quietly miss the fact that the machine is serving the whole party over WiFi.
+    # The interface holding the address is what players' packets will really arrive on.
+    lanparty_lan_dev: >-
+      {{ (ansible_facts['interfaces']
+          | map('extract', ansible_facts)
+          | selectattr('ipv4', 'defined')
+          | selectattr('ipv4.address', 'equalto', lanparty_lan_ip)
+          | map(attribute='device') | list | first) | default(lanparty_route_dev) }}
+
+- name: Preflight -- is the LAN interface wireless
+  ansible.builtin.stat:
+    # The kernel creates this directory only for 802.11 interfaces. Cheaper and more
+    # reliable than parsing `iw` output, and needs no extra package on the target.
+    path: "/sys/class/net/{{ lanparty_lan_dev }}/wireless"
+  register: lanparty_wireless
+  when: lanparty_lan_dev | length > 0
+
+- name: Preflight -- measure round trip time to the server
+  ansible.builtin.command:
+    # 20 packets at 5 Hz: four seconds, enough to catch a WiFi retransmit spike that a
+    # single ping would miss. -q keeps only the summary line.
+    argv: [ping, -q, -c, "20", -i, "0.2", -W, "1", "{{ lanparty_server_lan_ip }}"]
+  register: lanparty_ping
+  changed_when: false
+  failed_when: false
+  # Pinging yourself over `lo` measures nothing. Skip it on the server.
+  when: inventory_hostname != lanparty_server_host
+
+- name: Preflight -- default the round trip when it was not measured
+  ansible.builtin.set_fact:
+    # The server pings nothing (it IS the destination), and a failed ping leaves no
+    # summary line. Either way there is no measurement, and no measurement must not read
+    # as a bad one -- so the default is 0 and the budget check below passes.
+    lanparty_rtt_max: 0.0
+
+- name: Preflight -- extract the worst round trip seen
+  ansible.builtin.set_fact:
+    # Summary line: rtt min/avg/max/mdev = 0.312/0.498/1.204/0.201 ms
+    # regex_search with a capture group returns None when it does not match, and None is
+    # not subscriptable -- hence the default([], true), which also catches an empty list.
+    lanparty_rtt_max: >-
+      {{ (lanparty_ping.stdout | regex_search('=\\s*[\\d.]+/[\\d.]+/([\\d.]+)/', '\\1')
+          | default([], true) | first | default(0)) | float }}
+  when:
+    - inventory_hostname != lanparty_server_host
+    - (lanparty_ping.rc | default(1)) == 0
+
+# ---------------------------------------------------------------------------------------
+# Collect findings, then report them all at once. Building a list rather than failing on
+# the first problem means one run tells you everything wrong with a machine, instead of
+# making you fix and rerun four times.
+# ---------------------------------------------------------------------------------------
+- name: Preflight -- collect findings
+  ansible.builtin.set_fact:
+    # 100.64.0.0/10 is the CGNAT (Carrier Grade Network Address Translation) range Tailscale
+    # hands out. Tested with plain octet arithmetic rather than an ipaddr filter, because
+    # ipaddr lives in ansible.utils and pulling in a fourth collection to compare two
+    # integers is not a trade worth making.
+    lanparty_findings: >-
+      {{
+        ([]
+         + (['Game traffic would leave this machine over "' ~ lanparty_route_dev ~ '", which is a '
+             ~ 'Tailscale interface. That is the overlay network, not the LAN. Fix the lan_ip '
+             ~ 'values in inventory/hosts.yml.']
+            if 'tailscale' in lanparty_route_dev else [])
+         + (['This host lan_ip (' ~ lanparty_lan_ip ~ ') is inside 100.64.0.0/10, the tailnet '
+             ~ 'range. It must be the physical LAN address instead.']
+            if (lanparty_lan_ip.split('.')[0] == '100'
+                and 64 <= (lanparty_lan_ip.split('.')[1] | int) <= 127) else [])
+         + (['The server lan_ip (' ~ lanparty_server_lan_ip ~ ') is inside 100.64.0.0/10, the '
+             ~ 'tailnet range. Every client would connect over the overlay.']
+            if (lanparty_server_lan_ip.split('.')[0] == '100'
+                and 64 <= (lanparty_server_lan_ip.split('.')[1] | int) <= 127) else [])
+         + (['LAN interface "' ~ lanparty_lan_dev ~ '" is wireless. WiFi jitter is worse than '
+             ~ 'anything Tailscale would have cost -- wire this machine to the switch before '
+             ~ 'playing.']
+            if (lanparty_wireless.stat.exists | default(false)) else [])
+         + (['No route to the server at ' ~ lanparty_server_lan_ip ~ '. Same switch, same subnet?']
+            if lanparty_route.rc != 0 else [])
+         + (['Round trip to the server is ' ~ lanparty_rtt_max ~ ' ms, over the '
+             ~ lanparty_max_rtt_ms ~ ' ms budget.']
+            if (lanparty_rtt_max | float) > (lanparty_max_rtt_ms | float) else [])
+        )
+      }}
+
+- name: Preflight -- report a clean machine
+  ansible.builtin.debug:
+    msg: >-
+      LAN path OK. Game traffic to {{ lanparty_server_lan_ip }} uses
+      {{ lanparty_lan_dev }} (route via {{ lanparty_route_dev }}) from {{ lanparty_route_src }}
+      {{ ('at ' ~ lanparty_rtt_max ~ ' ms worst case.')
+         if inventory_hostname != lanparty_server_host
+         else '(this machine is the server).' }}
+  when: lanparty_findings | length == 0
+
+- name: Preflight -- report findings as warnings
+  ansible.builtin.debug:
+    msg: "{{ ['PREFLIGHT WARNINGS for ' ~ inventory_hostname ~ ':'] + lanparty_findings }}"
+  when:
+    - lanparty_findings | length > 0
+    - not lanparty_preflight_strict
+
+- name: Preflight -- fail on findings when strict
+  ansible.builtin.fail:
+    msg: "{{ ['PREFLIGHT FAILED for ' ~ inventory_hostname ~ ':'] + lanparty_findings }}"
+  when:
+    - lanparty_findings | length > 0
+    - lanparty_preflight_strict

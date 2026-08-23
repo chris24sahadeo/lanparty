@@ -1,0 +1,19 @@
+---
+# PINNED TO EXACT VERSIONS -- not a floor, not a range, not `latest`.
+#
+# These are the same versions the other Ansible trees on this workstation pin, so a
+# machine running all of them resolves one answer rather than several. They install into
+# .collections/ (see collections_path in ansible.cfg), NOT into the shared
+# ~/.ansible/collections, so pinning here cannot perturb them either way. The match is
+# belt and braces: if someone ever runs this tree without ANSIBLE_CONFIG set, the worst
+# case is a no-op rather than a downgrade under the other two repos.
+collections:
+  # ansible.posix.firewalld is unused; this is here for ansible.posix.sysctl, which
+  # roles/game_host uses to raise the UDP (User Datagram Protocol) socket buffer.
+  - name: ansible.posix
+    version: "2.2.2"
+  # community.general.ufw -- the ONLY firewall module we touch, and only when ufw
+  # (Uncomplicated Firewall) is already active. See roles/game_host for why we never
+  # enable it ourselves.
+  - name: community.general
+    version: "13.3.0"

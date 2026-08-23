@@ -1,0 +1,187 @@
+---
+# THE DEDICATED SERVER.
+#
+# Bound to the physical LAN address, with every path to the public internet closed. Those
+# two facts are the point of this role; everything else is gameplay taste.
+
+- name: Quake3 server -- create the service account
+  ansible.builtin.user:
+    name: "{{ lanparty_quake3_server_user }}"
+    system: true
+    # /var/games/quake3-server is where the ioq3ded AppArmor profile grants
+    # `owner ... rwk`. Any other home directory produces denials in dmesg -- harmless
+    # today because the shipped profile is flags=(complain), but only until someone
+    # enforces it.
+    home: "{{ lanparty_quake3_server_home }}"
+    create_home: true
+    shell: /usr/sbin/nologin
+    state: present
+  become: true
+
+- name: Quake3 server -- create the config directory inside the engine search path
+  ansible.builtin.file:
+    # NOT an arbitrary location. The engine's `exec` command resolves against its own
+    # virtual filesystem, not the real one, so a config at /etc/anything is unreachable
+    # by +exec. It has to sit at <fs_homepath>/baseq3/.
+    path: "{{ lanparty_quake3_server_home }}/baseq3"
+    state: directory
+    owner: "{{ lanparty_quake3_server_user }}"
+    group: "{{ lanparty_quake3_server_user }}"
+    mode: "0755"
+  become: true
+
+- name: Quake3 server -- write server.cfg
+  ansible.builtin.copy:
+    dest: "{{ lanparty_quake3_server_home }}/baseq3/server.cfg"
+    owner: "{{ lanparty_quake3_server_user }}"
+    group: "{{ lanparty_quake3_server_user }}"
+    mode: "0640"
+    content: |
+      // Managed by Ansible: {{ lanparty_repo_name | default('lanparty') }}/roles/quake3_server.
+      // Edits here are overwritten on the next run. Change group_vars/all.yml instead.
+
+      // ---- identity ----
+      sv_hostname     "{{ lanparty_quake3_hostname }}"
+      sv_maxclients   {{ lanparty_quake3_maxclients }}
+      rconPassword    "{{ lanparty_quake3_rcon_password }}"
+
+      // ---- NO INTERNET. This block is the whole reason the repo exists. ----
+      // `dedicated` is CVAR_INIT, so it can only be set on the command line -- see the
+      // systemd unit, which passes `+set dedicated 1`. 1 means LAN and never sends a
+      // heartbeat; 2 means public and advertises to the master servers. Never 2.
+      //
+      // The master list is blanked anyway, belt and braces, in case someone runs the
+      // binary by hand without the unit.
+      set sv_master1 ""
+      set sv_master2 ""
+      set sv_master3 ""
+      set sv_master4 ""
+      set sv_master5 ""
+      // sv_strictAuth defaults to 1, which makes the server contact
+      // authorize.quake3arena.com to validate each joining client's CD key. With no
+      // route to the internet that is not merely pointless -- joins stall on it.
+      set sv_strictAuth 0
+
+      // ---- data integrity ----
+      // sv_pure 1 rejects clients whose .pk3 set differs from the server's. Safe because
+      // Ansible pushes byte-identical data to every machine, and it is what stops one
+      // person with a doctored pak from having different hitboxes to everyone else.
+      set sv_pure {{ lanparty_quake3_sv_pure }}
+      set sv_allowDownload 1
+
+      // ---- tick and bandwidth: LAN values, not 1999 internet values ----
+      // sv_fps is the server tick rate. The stock 20 exists for dial-up. Clients ask for
+      // `snaps` frames per second and the server clamps that to sv_fps, so this number is
+      // the ceiling on how often anyone sees the world update.
+      set sv_fps {{ lanparty_quake3_sv_fps }}
+      set sv_minRate 0
+      set sv_maxRate 0
+      // Ignore each client's `rate` cvar for clients on the local subnet and give them
+      // the full pipe. Note this test is by subnet: a client connecting over the tailnet
+      // from 100.64.0.0/10 would NOT qualify, which is one more reason not to do that.
+      set sv_lanForceRate 1
+      set sv_floodProtect 0
+
+      // ---- gameplay ----
+      set g_gametype {{ lanparty_quake3_gametype }}
+      fraglimit {{ lanparty_quake3_fraglimit }}
+      timelimit {{ lanparty_quake3_timelimit }}
+      set g_allowvote 1
+      set bot_enable 1
+      // Bots fill empty slots so the server is worth joining before everyone arrives.
+      set bot_minplayers 4
+
+      // ---- map rotation ----
+      // A vstr chain: each entry sets the NEXT entry as nextmap, then loads its own map.
+      // `map` must come last in each string because it blocks, and the kickoff `vstr`
+      // must be the last line in the file so every cvar above is already set.
+      // g_gametype is re-set per entry because it is CVAR_LATCH and only takes effect on
+      // a map load.
+      {% for m in lanparty_quake3_maps %}
+      set m{{ loop.index }} "set g_gametype {{ lanparty_quake3_gametype }} ; set nextmap vstr m{{ loop.index0 + 2 if not loop.last else 1 }} ; map {{ m }}"
+      {% endfor %}
+      vstr m1
+  become: true
+  notify: Restart the Quake III dedicated server
+
+- name: Quake3 server -- install the systemd unit
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ game_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible: lanparty/roles/quake3_server. Edits are overwritten.
+      [Unit]
+      Description={{ game_display_name }} dedicated server (LAN only)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User={{ lanparty_quake3_server_user }}
+      Group={{ lanparty_quake3_server_user }}
+      WorkingDirectory={{ lanparty_quake3_server_home }}
+      # net_ip IS THE LATENCY GUARANTEE. Binding one address rather than 0.0.0.0 means
+      # the daemon does not listen on the tailscale0 interface at all, so no client can
+      # reach it over the overlay even by accident. net_ip and net_port are CVAR_LATCH,
+      # which is why they are here and not in server.cfg.
+      #
+      # `dedicated 1` is CVAR_INIT -- command line only. 1 = LAN, no master heartbeat.
+      #
+      # vm_game 0 forces the native qagame .so instead of the QVM bytecode interpreter.
+      # That matters for the hardening below: the QVM compiler needs a writable+executable
+      # page, so with the interpreter in play MemoryDenyWriteExecute cannot be set. Using
+      # the native module is also what Debian's own launcher does.
+      ExecStart=/usr/lib/ioquake3/ioq3ded \
+          +set dedicated 1 \
+          +set net_ip {{ lanparty_lan_ip }} \
+          +set net_port {{ lanparty_quake3_port }} \
+          +set fs_basepath {{ lanparty_quake3_basepath }} \
+          +set fs_homepath {{ lanparty_quake3_server_home }} \
+          +set com_hunkMegs 128 \
+          +set vm_game 0 \
+          +exec server.cfg
+      Restart=on-failure
+      RestartSec=5
+      # Exit 72 is "no game data". Restarting will not conjure a pak0.pk3.
+      RestartPreventExitStatus=72
+      StandardOutput=journal
+      StandardError=journal
+
+      # Hardening. Nothing exotic -- this is a 1999 C codebase listening on a socket.
+      NoNewPrivileges=true
+      PrivateTmp=true
+      PrivateDevices=true
+      ProtectHome=true
+      ProtectSystem=strict
+      ProtectKernelTunables=true
+      ProtectControlGroups=true
+      ReadWritePaths={{ lanparty_quake3_server_home }}
+      CapabilityBoundingSet=
+      RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+      # Left OFF deliberately even though vm_game 0 is set above: the UI and cgame VMs are
+      # not loaded by a dedicated server, but flipping this on has historically broken
+      # ioq3 in ways that only show up under load. Not worth it here.
+      MemoryDenyWriteExecute=false
+
+      [Install]
+      WantedBy=multi-user.target
+  become: true
+  notify:
+    - Reload systemd
+    - Restart the Quake III dedicated server
+
+- name: Quake3 server -- enable and start
+  ansible.builtin.systemd_service:
+    name: "{{ game_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+
+- name: Quake3 server -- report where it is listening
+  ansible.builtin.debug:
+    msg: >-
+      {{ game_display_name }} is serving on {{ lanparty_lan_ip }}:{{ lanparty_quake3_port }}
+      (physical LAN). Clients connect there, never to the tailnet address.

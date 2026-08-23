@@ -1,0 +1,308 @@
+---
+# THE PLAYER CLIENT: config plus a launcher that connects to the right address.
+
+- name: Quake3 client -- resolve the dedicated server address
+  ansible.builtin.set_fact:
+    lanparty_quake3_connect: >-
+      {{ hostvars[groups['game_server'][0]]['lan_ip']
+         | default(hostvars[groups['game_server'][0]]['ansible_facts']['default_ipv4']['address']) }}
+
+# ---------------------------------------------------------------------------------------
+# RESOLUTION, DETECTED RATHER THAN ASSUMED.
+#
+# Rendering at anything other than a fixed-pixel panel's native mode means the display
+# scales every frame, which is blurry -- and on a 3:2 laptop panel a 16:9 mode also gets
+# pillarboxed. A LAN party is a pile of different machines, so the right resolution is a
+# per-host fact, not a constant.
+#
+# /sys/class/drm is read instead of xrandr because it needs no X display, no package, and
+# works over a plain SSH connection with nobody logged in -- which is how every machine
+# except this one gets provisioned.
+# ---------------------------------------------------------------------------------------
+- name: Quake3 client -- detect the display's native resolution
+  ansible.builtin.shell: |
+    set -o pipefail
+    for c in /sys/class/drm/card*-*/; do
+      [ "$(cat "$c/status" 2>/dev/null)" = "connected" ] || continue
+      # First line of `modes` is the preferred mode, which for a laptop panel is native.
+      head -1 "$c/modes" 2>/dev/null && exit 0
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  register: lanparty_native_mode
+  changed_when: false
+  failed_when: false
+  when:
+    - lanparty_quake3_width | length == 0
+    - lanparty_quake3_height | length == 0
+
+- name: Quake3 client -- settle on a resolution
+  ansible.builtin.set_fact:
+    lanparty_gfx_width: >-
+      {{ lanparty_quake3_width if lanparty_quake3_width | length > 0
+         else (lanparty_native_mode.stdout | default('') | trim).split('x')[0] | default('', true) }}
+    lanparty_gfx_height: >-
+      {{ lanparty_quake3_height if lanparty_quake3_height | length > 0
+         else ((lanparty_native_mode.stdout | default('') | trim).split('x')[1]
+               if 'x' in (lanparty_native_mode.stdout | default('') | trim) else '') }}
+
+- name: Quake3 client -- report the resolution in use
+  ansible.builtin.debug:
+    msg: >-
+      {{ ('Rendering at ' ~ lanparty_gfx_width ~ 'x' ~ lanparty_gfx_height ~ ' (native).')
+         if lanparty_gfx_width | length > 0
+         else 'No display mode detected; falling back to r_mode -2, the desktop resolution.' }}
+
+- name: Quake3 client -- create the per-user game directory
+  ansible.builtin.file:
+    # ~/.q3a is fs_homepath for this engine build, and the one path the client's AppArmor
+    # profile grants the user read AND write under. Note that upstream ioquake3 moved to
+    # XDG directories in Oct 2025; Ubuntu 24.04 ships a Feb 2024 snapshot, which is still
+    # ~/.q3a. If this repo is ever pointed at a newer engine, this is the line to revisit.
+    path: "{{ ansible_facts['user_dir'] }}/.q3a/baseq3"
+    state: directory
+    mode: "0755"
+
+# ---------------------------------------------------------------------------------------
+# THE CONFIG, AND WHY IT IS NOT CALLED q3config.cfg.
+#
+# The guide this setup came from says to drop q3config.cfg into baseq3/. That works
+# exactly once. The engine REWRITES q3config.cfg from its live cvar state on every clean
+# exit, so the first player to quit the game silently overwrites the tuned config with
+# whatever the menus happened to contain, permanently, on that machine.
+#
+# autoexec.cfg is the file Quake III execs AFTER q3config.cfg on every start. Settings
+# here therefore win each launch and survive the engine's writeback. Same content, right
+# filename.
+# ---------------------------------------------------------------------------------------
+- name: Quake3 client -- write autoexec.cfg
+  ansible.builtin.copy:
+    dest: "{{ ansible_facts['user_dir'] }}/.q3a/baseq3/autoexec.cfg"
+    mode: "0644"
+    content: |
+      // Managed by Ansible: lanparty/roles/quake3_client. Edits are overwritten.
+      //
+      // Part 1 is the tuned config from the setup guide, verbatim. It carries a handful
+      // of sv_* cvars, which do nothing here -- they would only apply if someone started
+      // a listen server on this machine, and the party uses a dedicated one.
+      {{ lookup('ansible.builtin.file', role_path ~ '/files/autoexec.base.cfg') }}
+
+      // Part 2: LAN overrides. These come last, so they win.
+      //
+      // The base config was tuned on one machine for internet play. snaps 20 and
+      // cl_maxpackets 30 are the values that assumption produces, and on a switch they
+      // throw away information the wire can carry for free.
+      {% for cvar in lanparty_quake3_lan_cvars %}
+      {{ cvar }}
+      {% endfor %}
+
+      // Part 3: graphics, tuned to this machine.
+      //
+      // Resolution first. r_mode -1 means "use r_customwidth/r_customheight"; -2 means
+      // "use the desktop resolution" and is the fallback when nothing was detected.
+      // These three are CVAR_LATCH, so a change needs a /vid_restart -- which is exactly
+      // what happens anyway on the next launch.
+      {% if lanparty_gfx_width | length > 0 %}
+      seta r_mode "-1"
+      seta r_customwidth "{{ lanparty_gfx_width }}"
+      seta r_customheight "{{ lanparty_gfx_height }}"
+      seta r_customPixelAspect "1"
+      {% else %}
+      seta r_mode "-2"
+      {% endif %}
+      seta r_fullscreen "1"
+
+      // Which renderer to load. See lanparty_quake3_renderer in group_vars for why this
+      // is opengl1 and not the engine's opengl2 default.
+      seta cl_renderer "{{ lanparty_quake3_renderer }}"
+
+      {% for cvar in lanparty_quake3_gfx_cvars %}
+      {{ cvar }}
+      {% endfor %}
+
+      // Never contact updates.quake3arena.com at startup. Without this the client tries,
+      // on a network with no route out, and the startup hitch is real.
+      seta cl_motd "0"
+      // Let the server push any map the client is missing. UDP download over a LAN is
+      // instant and it beats walking a USB stick around.
+      seta cl_allowDownload "1"
+
+      // Part 4: the player's own overrides, LAST so they win over everything above.
+      // Ansible creates that file once and never rewrites it -- see the role. This is
+      // the only file in the chain a person is meant to edit by hand.
+      exec lanparty-local.cfg
+
+# ---------------------------------------------------------------------------------------
+# LAUNCHER.
+#
+# The Ubuntu packages put nothing on $PATH -- the binary is /usr/lib/ioquake3/ioquake3 and
+# the multiverse `quake3` wrapper is the thing that normally provides a friendly name. We
+# are not installing that (see roles/quake3_common), so this script is the wrapper, and it
+# is better for the purpose anyway: it hard-codes the server's LAN address, so nobody can
+# absent-mindedly join over the tailnet.
+# ---------------------------------------------------------------------------------------
+- name: Quake3 client -- install the launcher
+  ansible.builtin.copy:
+    dest: /usr/local/bin/lanparty-quake3
+    owner: root
+    group: root
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      # Managed by Ansible: lanparty/roles/quake3_client. Edits are overwritten.
+      #
+      # Joins the dedicated server over the PHYSICAL LAN. The address below is not this
+      # machine's tailnet address and must not be replaced with one -- that is the whole
+      # point of the setup.
+      set -eu
+
+      SERVER="{{ lanparty_quake3_connect }}:{{ lanparty_quake3_port }}"
+      ENGINE=/usr/lib/ioquake3/ioquake3
+      BASE="+set fs_basepath {{ lanparty_quake3_basepath }} +set com_hunkMegs 128"
+
+      usage() {
+        cat <<'USAGE'
+      Quake III Arena, LAN party build.
+
+        q                 join the server immediately
+        q -m, --menu      start at the main menu instead, for changing settings
+        q -w, --windowed  join, but windowed -- handy with a config open beside it
+        q -s HOST[:PORT]  join a different server
+        q -h, --help      this text
+
+      Anything else is passed straight to the engine, so console commands work:
+
+        q +set r_customwidth 1920 +set r_customheight 1080
+        q --menu +set cl_renderer opengl2
+
+      WHERE SETTINGS LIVE, and which of them survive what:
+
+        1. autoexec.cfg      generated by Ansible, OVERWRITTEN on every run.
+                             Do not edit -- change group_vars/all.yml and re-run.
+        2. lanparty-local.cfg  yours. Created once, never touched again by Ansible,
+                             and exec'd last so it beats everything above.
+                             ~/.q3a/baseq3/lanparty-local.cfg
+        3. q3config.cfg      written by the ENGINE when you quit. Anything you change
+                             in the menus lands here -- and is then overridden on the
+                             next launch by 1 and 2. Menu changes do not stick. That
+                             is deliberate, not a bug.
+
+      So: to try something, use the console (~) -- it applies now and is forgotten.
+      To keep it for yourself, put it in lanparty-local.cfg.
+      To keep it for everyone, put it in group_vars/all.yml and re-run Ansible.
+      USAGE
+      }
+
+      CONNECT="+connect $SERVER"
+      EXTRA=""
+
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          -h|--help)     usage; exit 0 ;;
+          # No +connect at all, so the game stops at the main menu. This is the one you
+          # want for poking at Setup > System, or for playing bots offline.
+          -m|--menu)     CONNECT=""; shift ;;
+          -w|--windowed) EXTRA="$EXTRA +set r_fullscreen 0"; shift ;;
+          -s|--server)
+            [ $# -ge 2 ] || { echo "q: --server needs an address" >&2; exit 2; }
+            case "$2" in *:*) CONNECT="+connect $2" ;;
+                         *)   CONNECT="+connect $2:{{ lanparty_quake3_port }}" ;; esac
+            shift 2 ;;
+          *) break ;;
+        esac
+      done
+
+      # Unquoted on purpose: these hold multiple engine arguments, not one path.
+      # shellcheck disable=SC2086
+      exec "$ENGINE" $BASE $CONNECT $EXTRA "$@"
+  become: true
+
+- name: Quake3 client -- is the short alias name already taken
+  ansible.builtin.stat:
+    path: "/usr/local/bin/{{ lanparty_quake3_alias }}"
+  register: lanparty_alias_path
+  when: lanparty_quake3_alias | length > 0
+
+- name: Quake3 client -- refuse to clobber an unrelated command
+  ansible.builtin.assert:
+    # A one-letter name is cheap to type and cheap to collide with. If something else
+    # already owns it, say so rather than silently replacing a tool the machine's owner
+    # installed on purpose.
+    that:
+      - not lanparty_alias_path.stat.exists
+        or lanparty_alias_path.stat.islnk | default(false)
+    fail_msg: >-
+      /usr/local/bin/{{ lanparty_quake3_alias }} already exists and is not a symlink, so
+      something else owns that name. Pick a different lanparty_quake3_alias, or set it to
+      "" to skip the shortcut.
+    quiet: true
+  when: lanparty_quake3_alias | length > 0
+
+- name: Quake3 client -- link the short alias to the launcher
+  ansible.builtin.file:
+    src: /usr/local/bin/lanparty-quake3
+    dest: "/usr/local/bin/{{ lanparty_quake3_alias }}"
+    state: link
+  become: true
+  when: lanparty_quake3_alias | length > 0
+
+# ---------------------------------------------------------------------------------------
+# A PLACE FOR PERSONAL SETTINGS THAT SURVIVES BOTH THINGS THAT ERASE THEM.
+#
+# autoexec.cfg is regenerated by Ansible on every run, and q3config.cfg is rewritten by
+# the engine on every quit. Between the two there is nowhere for a player to put a setting
+# and expect to find it later -- which is a real problem when the answer to "how do I
+# change this" is otherwise "edit a repo and re-run a playbook".
+#
+# force: false is what makes this work: Ansible creates the file once and then never
+# touches it again, no matter how many times the playbook runs.
+# ---------------------------------------------------------------------------------------
+- name: Quake3 client -- create the personal override file, once
+  ansible.builtin.copy:
+    dest: "{{ ansible_facts['user_dir'] }}/.q3a/baseq3/lanparty-local.cfg"
+    mode: "0644"
+    force: false
+    content: |
+      // YOUR settings. Ansible created this file once and will never overwrite it.
+      //
+      // autoexec.cfg execs this last, so anything here beats both the shipped config and
+      // whatever the menus wrote into q3config.cfg. Uncomment and edit freely.
+      //
+      // seta sensitivity "2.5"
+      // seta cg_fov "110"
+      // seta com_maxfps "125"      // 125 is the value Quake III's jump physics expect
+      // seta r_swapInterval "1"    // vsync ON, if you would rather not have tearing
+      // seta cl_renderer "opengl2" // the fancier renderer, at the cost of load hitches
+      //
+      // Reload without restarting the game:  /exec lanparty-local.cfg
+
+- name: Quake3 client -- ensure the user applications directory exists
+  ansible.builtin.file:
+    path: "{{ ansible_facts['user_dir'] }}/.local/share/applications"
+    state: directory
+    mode: "0755"
+
+- name: Quake3 client -- install a desktop entry
+  ansible.builtin.copy:
+    dest: "{{ ansible_facts['user_dir'] }}/.local/share/applications/lanparty-quake3.desktop"
+    mode: "0644"
+    # No MimeType line on purpose. Claiming a default handler is how two config-management
+    # repos on one machine end up fighting over the same association forever, and this
+    # workstation already runs two others.
+    content: |
+      [Desktop Entry]
+      Type=Application
+      Name={{ game_display_name }} (LAN party)
+      Comment=Connect to {{ lanparty_quake3_connect }}:{{ lanparty_quake3_port }}
+      Exec=/usr/local/bin/lanparty-quake3
+      Terminal=false
+      Categories=Game;ActionGame;
+      Keywords=quake;fps;lan;
+
+- name: Quake3 client -- report how to play
+  ansible.builtin.debug:
+    msg: >-
+      Run `{{ lanparty_quake3_alias | default('lanparty-quake3', true) }}` to join
+      {{ lanparty_quake3_connect }}:{{ lanparty_quake3_port }}, or launch
+      "{{ game_display_name }} (LAN party)" from the applications menu.

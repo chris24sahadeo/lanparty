@@ -1,0 +1,184 @@
+---
+# Every variable this repo understands. One file, all prefixed `lanparty_`, so a grep for
+# the prefix finds every knob.
+
+# ---------------------------------------------------------------------------------------
+# WHICH GAME
+# ---------------------------------------------------------------------------------------
+# Selects games/<id>.yml. Adding a game means adding that manifest plus the roles it
+# names -- nothing in site.yml changes. See README, "Adding a game".
+lanparty_game: quake3
+
+# ---------------------------------------------------------------------------------------
+# THE LAN PATH -- the reason this repo exists
+# ---------------------------------------------------------------------------------------
+# The address the game binds and connects on. Defaults to the host's primary IPv4 address,
+# which is correct for a machine with one NIC (Network Interface Card). Override per host
+# with `lan_ip:` in inventory/hosts.yml for anything multi-homed.
+#
+# This must never resolve to a 100.64.0.0/10 tailnet address. roles/lan_preflight checks it.
+lanparty_lan_ip: "{{ lan_ip | default(ansible_facts['default_ipv4']['address']) }}"
+
+# Preflight is WARN-ONLY by default: it prints findings and continues, so a first run on a
+# half-assembled network still provisions everything. Flip to true on party morning and a
+# machine whose game traffic would cross the tailnet, or whose ping is over budget, fails
+# the run instead.
+lanparty_preflight_strict: false
+
+# Worst acceptable round trip to the server, milliseconds. A wired 1GbE switch gives well
+# under 1 ms; contended WiFi gives 5-50 ms with spikes an order of magnitude worse. 5 is a
+# threshold that passes any wired setup and flags most wireless ones.
+lanparty_max_rtt_ms: 5
+
+# ---------------------------------------------------------------------------------------
+# QUAKE III ARENA -- game data
+# ---------------------------------------------------------------------------------------
+# Path ON THE CONTROL NODE to the baseq3 archive. Retail id Software data: not
+# redistributable, so it is never committed -- .gitignore blocks *.pk3 and baseq3.zip.
+# Ansible reads it here and pushes it to every machine, so only the control node needs it.
+lanparty_quake3_baseq3_src: "{{ lookup('env', 'HOME') }}/Downloads/baseq3.zip"
+
+# sha256 of that archive. Set to "" to skip the check; leaving it set means a truncated or
+# swapped download fails loudly instead of producing a server nobody can join.
+lanparty_quake3_baseq3_sha256: "bd543781e517ff1eff6ae2a4a602c6e0f450bcfc3d3424d9e12f86266f82b302"
+
+# Where the .pk3 files land. /usr/lib/quake3/base/baseq3 is not arbitrary: Debian's
+# ioquake3 package pre-creates that exact directory for game data, and BOTH AppArmor
+# profiles (/etc/apparmor.d/usr.lib.ioquake3.{ioquake3,ioq3ded}) allow reads under
+# /usr/lib/quake3/. Putting the data anywhere else means fighting a confinement profile.
+lanparty_quake3_basepath: /usr/lib/quake3/base
+
+# ---------------------------------------------------------------------------------------
+# QUAKE III ARENA -- dedicated server
+# ---------------------------------------------------------------------------------------
+lanparty_quake3_hostname: "Office LAN Party"
+lanparty_quake3_port: 27960
+lanparty_quake3_maxclients: 16
+# 0 free-for-all, 1 tournament, 3 team deathmatch, 4 capture the flag.
+lanparty_quake3_gametype: 0
+lanparty_quake3_fraglimit: 30
+lanparty_quake3_timelimit: 15
+# Server tick rate. The client's `snaps` should match it -- see lanparty_quake3_lan_cvars.
+# 40 is the LAN standard; the stock default of 20 exists for 1999 internet links.
+lanparty_quake3_sv_fps: 40
+# sv_pure 1 makes the server reject clients whose .pk3 set does not match. Safe here
+# because Ansible pushes byte-identical data everywhere; it is also what stops one person
+# with a modified pak from having different hitboxes.
+lanparty_quake3_sv_pure: 1
+lanparty_quake3_maps:
+  - q3dm6
+  - q3dm7
+  - q3dm17
+  - q3tourney2
+# Remote console password. Override on the command line for a real party:
+#   ./bootstrap.sh -e lanparty_quake3_rcon_password=something
+# Never commit a real one -- this repo is public.
+lanparty_quake3_rcon_password: "changeme"
+
+# Short command name symlinked to the launcher, so `q` starts the game and joins the
+# server. Set to "" to skip it.
+#
+# A SYMLINK IN /usr/local/bin, NOT A SHELL ALIAS. An alias means writing into ~/.zshrc,
+# and on this workstation shell config belongs to chezmoi -- an Ansible role editing it
+# is the rule this machine already follows being broken. The symlink also works in
+# non-interactive shells, over ssh, from the .desktop entry, and in any shell at all,
+# which an alias does not.
+lanparty_quake3_alias: q
+
+# System account the dedicated server runs as. Not a login user.
+lanparty_quake3_server_user: quake3-server
+# fs_homepath for the server. AppArmor allows the server rwk under
+# /var/games/quake3-server/, which is why it is here and not under /opt.
+lanparty_quake3_server_home: /var/games/quake3-server
+
+# ---------------------------------------------------------------------------------------
+# QUAKE III ARENA -- graphics
+# ---------------------------------------------------------------------------------------
+# Resolution is DETECTED PER MACHINE, not written down here. Leave these empty and the
+# client role reads the connected display's preferred mode out of /sys/class/drm. A LAN
+# party is a pile of different laptops and monitors; one hardcoded resolution is wrong on
+# most of them, and rendering at non-native resolution on a fixed-pixel panel means the
+# display scales every frame -- blurry, and on a 3:2 panel a 16:9 mode also gets pillared.
+# Set them to force a specific mode on every machine.
+lanparty_quake3_width: ""
+lanparty_quake3_height: ""
+
+# Which renderer. ioquake3 ships two and defaults to opengl2.
+#
+# WE PICK opengl1, DELIBERATELY. opengl2 adds per-pixel lighting, HDR and bloom, and it
+# compiles shaders on first map load -- a visible hitch, at the exact moment everyone
+# spawns. opengl1 is the renderer this game's art was authored against, has flat frame
+# times, and on any GPU made this decade neither one is the bottleneck. Predictable beats
+# pretty at a LAN party. Set to "opengl2" if you would rather have the effects.
+lanparty_quake3_renderer: opengl1
+
+# Quality settings. Hardware-agnostic: Quake III is a 1999 title and every one of these is
+# free on a modern integrated GPU, so they are turned up rather than tuned per machine.
+# The ones that would cost input latency are called out individually.
+lanparty_quake3_gfx_cvars:
+  - seta r_allowExtensions "1"
+  # 4x multisample anti-aliasing. At native laptop resolution this is not measurable on
+  # anything current, and Quake III's hard geometric edges are exactly what MSAA fixes.
+  - seta r_ext_multisample "4"
+  # Anisotropic filtering: keeps floor and wall textures sharp at grazing angles, which is
+  # most of what you look at while strafing down a corridor.
+  - seta r_ext_texture_filter_anisotropic "1"
+  - seta r_ext_max_anisotropy "16"
+  # Trilinear. The engine default is GL_LINEAR_MIPMAP_NEAREST, which shows a visible seam
+  # where mipmap levels change. Note the capital M -- the cvar is r_textureMode.
+  - seta r_textureMode "GL_LINEAR_MIPMAP_LINEAR"
+  # 0 = full texture resolution. Higher numbers were how you made 1999 hardware cope.
+  - seta r_picmip "0"
+  - seta r_texturebits "32"
+  - seta r_colorbits "32"
+  - seta r_depthbits "24"
+  # Stencil buffer, required for real shadows rather than the blob.
+  - seta r_stencilbits "8"
+  # Curve tessellation. Default 4 makes arches and pipes visibly faceted; 1 is the finest.
+  - seta r_subdivisions "1"
+  # Level of detail. Together these stop models and curves visibly snapping between
+  # detail levels as you move -- distracting, and the movement it draws the eye to is
+  # sometimes an opponent.
+  - seta r_lodbias "0"
+  - seta r_lodCurveError "10000"
+  - seta r_detailtextures "1"
+  - seta r_marksOnTriangleMeshes "1"
+  # r_fastsky 1 paints the sky flat to save fill rate. Nothing here needs that saving.
+  - seta r_fastsky "0"
+  - seta r_dynamiclight "1"
+  - seta r_flares "1"
+  - seta cg_shadows "1"
+  # VSYNC OFF. Costs tearing, saves up to a whole frame of input latency, and this panel
+  # is 60 Hz while the game runs at 125.
+  - seta r_swapInterval "0"
+  # LEAVE AT 0. r_finish 1 forces the CPU to block until the GPU has finished every frame.
+  # It is sometimes suggested as a smoothness fix and it is a direct input-latency tax.
+  - seta r_finish "0"
+  # 125, not 120 and not uncapped. Quake III's movement physics are framerate-coupled --
+  # jump height and strafe acceleration change with com_maxfps, and 125 is the value the
+  # whole game's muscle memory was built on.
+  - seta com_maxfps "125"
+
+# ---------------------------------------------------------------------------------------
+# QUAKE III ARENA -- client
+# ---------------------------------------------------------------------------------------
+# Appended after the shipped config so these win. The base config came from a single
+# player's machine and carries `snaps 20` / `cl_maxpackets 30`, which are internet-era
+# values -- on a LAN they throw away information the network can easily carry. Set to []
+# to ship the base config untouched.
+lanparty_quake3_lan_cvars:
+  # Bytes per second the client will accept. 25000 is the engine's practical ceiling.
+  - seta rate "25000"
+  # Snapshots per second requested from the server. Must not exceed the server's sv_fps,
+  # or the client asks for frames that do not exist.
+  - seta snaps "{{ lanparty_quake3_sv_fps }}"
+  # Client-to-server packets per second. The engine hard-clamps this to [15, 125]; 30 is
+  # an internet-era compromise. On a LAN, more packets means the server sees your input
+  # sooner, and 125 is the ceiling.
+  - seta cl_maxpackets "125"
+  # Interpolation nudge. Non-zero trades smoothness against a deliberate delay -- exactly
+  # what we are removing. 0 on a LAN, always.
+  - seta cl_timenudge "0"
+  # Explicit rather than inherited: the base config's cl_maxpackets change makes this the
+  # matching half.
+  - seta cl_packetdup "0"

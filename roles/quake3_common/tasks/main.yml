@@ -1,0 +1,125 @@
+---
+# ENGINE AND GAME DATA. Applied to the server and to every client -- both need the same
+# .pk3 files, and sv_pure 1 means "the same" is literal.
+
+# ---------------------------------------------------------------------------------------
+# WHICH PACKAGES, AND WHY NOT THE OBVIOUS ONES.
+#
+#   ioquake3         universe. The client engine. ioquake3 1.36, DFSG-free, no game data.
+#   ioquake3-server  universe. ioq3ded plus the qagame server modules.
+#
+# We deliberately do NOT install `quake3` or `quake3-server`. Those live in MULTIVERSE,
+# are only launcher wrappers built from game-data-packager, and enabling multiverse on
+# someone's workstation is a system-wide apt change this repo has no business making.
+# Everything the wrappers do -- pass fs_basepath, pick a homepath -- we do explicitly, in
+# the systemd unit and the launcher script, where it is readable.
+#
+# Neither package is on $PATH. The binaries are /usr/lib/ioquake3/{ioquake3,ioq3ded}.
+# ---------------------------------------------------------------------------------------
+- name: Quake3 -- install the engine
+  ansible.builtin.apt:
+    name:
+      - ioquake3
+      - ioquake3-server
+      # Needed to unpack baseq3.zip on the target.
+      - unzip
+    state: present
+    # Ensure-presence only. No version pin, no apt source added, no dist-upgrade -- the
+    # rule this workstation's other two Ansible trees already follow.
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+# ---------------------------------------------------------------------------------------
+# GAME DATA.
+#
+# pak0.pk3 is retail id Software data and is not redistributable, so it is not in this
+# repo and never will be -- .gitignore blocks *.pk3 and baseq3.zip. The archive lives on
+# the CONTROL NODE only; Ansible pushes it from there to each machine, so nobody has to
+# carry a CD around the office.
+# ---------------------------------------------------------------------------------------
+- name: Quake3 -- check the game data archive exists on the control node
+  ansible.builtin.stat:
+    path: "{{ lanparty_quake3_baseq3_src }}"
+    checksum_algorithm: sha256
+    get_checksum: "{{ lanparty_quake3_baseq3_sha256 | length > 0 }}"
+  register: lanparty_baseq3_src
+  delegate_to: localhost
+  run_once: true
+  changed_when: false
+
+- name: Quake3 -- fail clearly when the game data is missing or wrong
+  ansible.builtin.assert:
+    that:
+      - lanparty_baseq3_src.stat.exists
+      - lanparty_quake3_baseq3_sha256 | length == 0
+        or lanparty_baseq3_src.stat.checksum == lanparty_quake3_baseq3_sha256
+    fail_msg: >-
+      Quake III game data not usable at {{ lanparty_quake3_baseq3_src }}
+      ({{ 'file not found' if not lanparty_baseq3_src.stat.exists else 'sha256 mismatch' }}).
+      This is retail data the repo cannot ship. Point lanparty_quake3_baseq3_src at your
+      copy of baseq3.zip, or at a zip containing baseq3/pak0.pk3 taken from a retail CD,
+      Steam (appid 2200) or GOG. Update lanparty_quake3_baseq3_sha256 to match, or set it
+      to "" to skip the check.
+    quiet: true
+  run_once: true
+
+- name: Quake3 -- create the game data directory
+  ansible.builtin.file:
+    # /usr/lib/quake3/base is not an arbitrary choice: the Debian package pre-creates it
+    # with the cgame/ui/qagame .so modules already symlinked in, and both AppArmor
+    # profiles allow reads under /usr/lib/quake3/. Dropping the paks alongside those
+    # modules makes one coherent fs_basepath.
+    path: "{{ lanparty_quake3_basepath }}/baseq3"
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: Quake3 -- has the game data already been unpacked
+  ansible.builtin.stat:
+    path: "{{ lanparty_quake3_basepath }}/baseq3/pak0.pk3"
+  register: lanparty_pak0
+
+- name: Quake3 -- unpack the game data
+  ansible.builtin.unarchive:
+    src: "{{ lanparty_quake3_baseq3_src }}"
+    dest: "{{ lanparty_quake3_basepath }}"
+    # The archive was made on macOS, so it carries a __MACOSX/ tree of AppleDouble
+    # resource forks. They are not pk3 files; leaving them out keeps the sv_pure
+    # checksum list to real data and saves copying a few hundred junk entries.
+    #
+    # It also ships its own q3config.cfg. That must not land either: the client config is
+    # built by roles/quake3_client from a known base, and a stray one in the basepath
+    # would be a second, invisible source of cvars.
+    #
+    # Everything goes through `exclude` -- it already becomes unzip's -x. Passing a second
+    # -x through extra_opts would put it after the archive name, where unzip reads it as a
+    # file to extract rather than to skip.
+    exclude:
+      - "__MACOSX"
+      - "__MACOSX/*"
+      - "baseq3/q3config.cfg"
+    owner: root
+    group: root
+    # CAPITAL X, NOT 0644. unarchive applies `mode` to everything it extracts, including
+    # the baseq3 DIRECTORY -- and a directory at 0644 has no execute bit, so nobody but
+    # root can traverse into it and every read of a pak fails with EACCES. `X` sets the
+    # execute bit only on directories (and on files that already had it), which is what
+    # 0644 was reaching for.
+    mode: "u=rwX,g=rX,o=rX"
+  become: true
+  when: not lanparty_pak0.stat.exists
+
+- name: Quake3 -- confirm the retail data is present
+  ansible.builtin.stat:
+    path: "{{ lanparty_quake3_basepath }}/baseq3/pak0.pk3"
+  register: lanparty_pak0_final
+  changed_when: false
+
+- name: Quake3 -- report the installed data
+  ansible.builtin.assert:
+    that: lanparty_pak0_final.stat.exists
+    fail_msg: >-
+      pak0.pk3 is still absent from {{ lanparty_quake3_basepath }}/baseq3 after unpacking.
+      The archive probably does not have a top-level baseq3/ directory.
+    quiet: true

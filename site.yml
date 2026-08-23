@@ -1,0 +1,72 @@
+---
+# LAN party provisioning. Four plays, in the order the dependencies actually run:
+# prove the network, prepare the hosts, stand up the server, then the clients.
+#
+# The game is chosen by lanparty_game (group_vars/all.yml), which selects a manifest under
+# games/. Nothing below names Quake III.
+
+- name: "Preflight -- prove gameplay traffic stays on the LAN"
+  hosts: game_server:game_clients
+  gather_facts: true
+  become: false
+  tags: [preflight]
+  tasks:
+    - name: Load the game manifest
+      ansible.builtin.include_vars:
+        file: "games/{{ lanparty_game }}.yml"
+
+    - name: Check the LAN path
+      ansible.builtin.include_role:
+        name: lan_preflight
+
+- name: "Host prep -- directories, service account, firewall"
+  hosts: game_server:game_clients
+  gather_facts: true
+  become: false
+  tags: [host]
+  tasks:
+    - name: Load the game manifest
+      ansible.builtin.include_vars:
+        file: "games/{{ lanparty_game }}.yml"
+
+    - name: Prepare the host
+      ansible.builtin.include_role:
+        name: game_host
+
+- name: "Dedicated server"
+  hosts: game_server
+  gather_facts: true
+  become: false
+  tags: [server]
+  tasks:
+    - name: Load the game manifest
+      ansible.builtin.include_vars:
+        file: "games/{{ lanparty_game }}.yml"
+
+    # Engine and game data, shared with the clients.
+    - name: Install the game
+      ansible.builtin.include_role:
+        name: "{{ game_common_role }}"
+
+    - name: Configure the dedicated server
+      ansible.builtin.include_role:
+        name: "{{ game_server_role }}"
+
+- name: "Player clients"
+  hosts: game_clients
+  gather_facts: true
+  become: false
+  tags: [client]
+  tasks:
+    - name: Load the game manifest
+      ansible.builtin.include_vars:
+        file: "games/{{ lanparty_game }}.yml"
+
+    # Idempotent, so the machine that is both server and client just reports no change.
+    - name: Install the game
+      ansible.builtin.include_role:
+        name: "{{ game_common_role }}"
+
+    - name: Configure the player client
+      ansible.builtin.include_role:
+        name: "{{ game_client_role }}"

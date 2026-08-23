@@ -1,0 +1,49 @@
+---
+# THE LAN PARTY ROSTER. This is the file you edit before an event.
+#
+# TWO ADDRESSES PER MACHINE, AND THEY ARE NEVER INTERCHANGED:
+#
+#   ansible_host   the tailnet (Tailscale) address, 100.64.0.0/10.
+#                  DEPLOYMENT ONLY. Ansible reaches the machine over it to install
+#                  things. Deployment is not latency sensitive and the tailnet is the
+#                  only address that works before anyone is in the same room.
+#
+#   lan_ip         the physical LAN address, e.g. 192.168.x.x.
+#                  GAMEPLAY ONLY. The dedicated server binds this address and clients
+#                  connect to it, so input packets ride the office switch and never enter
+#                  the WireGuard tunnel. Optional: if you omit it, the host's default
+#                  IPv4 address is used, which is right for any machine with one NIC
+#                  (Network Interface Card). Set it explicitly on machines with several.
+#
+# `ansible-playbook --tags preflight` reports whether the LAN path is really being used
+# before you install anything. Run it once everyone is plugged in.
+all:
+  vars:
+    # Override per host if a machine has a different login.
+    ansible_user: chris
+
+  children:
+    # EXACTLY ONE HOST. The dedicated server. Its lan_ip is what every client connects to.
+    game_server:
+      hosts:
+        control-node:
+          ansible_connection: local
+
+    # Every machine someone plays on. The server machine may also appear here -- one
+    # person hosting and playing on the same box is the normal small-party setup.
+    game_clients:
+      hosts:
+        control-node:
+          ansible_connection: local
+
+        # --- Add party machines below. Uncomment and fill in. -------------------------
+        # Get the tailnet address from `tailscale status`. Get the LAN address from
+        # `ip -4 -br addr` on that machine, or leave lan_ip out to auto-detect.
+        #
+        # someones-laptop:
+        #   ansible_host: 100.64.0.2        # tailnet -- DEPLOY ONLY
+        #   lan_ip: 192.168.1.41            # physical LAN -- GAMEPLAY
+        #
+        # someone-elses-laptop:
+        #   ansible_host: 100.64.0.3
+        #   lan_ip: 192.168.1.42            # omit to auto-detect

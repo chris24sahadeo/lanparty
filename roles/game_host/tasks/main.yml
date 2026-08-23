@@ -1,0 +1,72 @@
+---
+# GENERIC HOST PREP -- everything that is true for any game, driven by the manifest.
+#
+# This role never names a game. It reads game_udp_ports / game_tcp_ports / game_id out of
+# games/<id>.yml, so a new game gets its firewall handling and hostname entry for free.
+
+# ---------------------------------------------------------------------------------------
+# /etc/hosts -- a stable name for the server, pinned to its LAN address.
+#
+# WHY THIS EXISTS AND IS NOT COSMETIC. Every machine here is on a tailnet with MagicDNS,
+# so the server's hostname very likely ALREADY resolves -- to its 100.64.x.x tailnet
+# address. Anyone who types the hostname instead of the address ends up playing over the
+# overlay without noticing. A hosts entry that resolves first removes that trap.
+#
+# blockinfile with a distinct marker, not a template: /etc/hosts is also written by
+# cloud-init, systemd, and tailscaled. Owning the whole file would fight all three.
+# ---------------------------------------------------------------------------------------
+- name: Host -- pin the game server name to its LAN address in /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED BLOCK lanparty"
+    block: |
+      {{ hostvars[groups['game_server'][0]]['lan_ip']
+         | default(hostvars[groups['game_server'][0]]['ansible_facts']['default_ipv4']['address']) }} lanparty-server
+    create: false
+  become: true
+
+# ---------------------------------------------------------------------------------------
+# Firewall.
+#
+# POLICY: OPEN PORTS IF A FIREWALL IS ALREADY RUNNING. NEVER TURN ONE ON.
+#
+# Enabling ufw (Uncomplicated Firewall) on a machine that was not using it is a real way
+# to break someone's workstation from a game-provisioning playbook -- most obviously on a
+# Docker host, where ufw does not filter Docker's own iptables chain and the resulting
+# behaviour surprises everyone. This laptop runs Docker. So: probe, and act only on a
+# firewall the machine's owner already chose to run.
+# ---------------------------------------------------------------------------------------
+- name: Host -- is ufw installed and active
+  ansible.builtin.command:
+    argv: [ufw, status]
+  register: lanparty_ufw
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Host -- open the game ports, but only on a firewall that was already up
+  community.general.ufw:
+    rule: allow
+    port: "{{ item[0] }}"
+    proto: "{{ item[1] }}"
+    comment: "lanparty {{ game_id }}"
+  # product() is a Jinja builtin and pairs each port with its protocol, giving
+  # [[27960, 'udp'], ...]. Deliberately not community.general.dict_kv plus combine:
+  # that chain reads as three transformations to produce two values.
+  loop: >-
+    {{ (game_udp_ports | product(['udp']) | list)
+       + (game_tcp_ports | product(['tcp']) | list) }}
+  loop_control:
+    label: "{{ item[0] }}/{{ item[1] }}"
+  when:
+    - lanparty_ufw.rc == 0
+    - "'Status: active' in lanparty_ufw.stdout"
+  become: true
+
+- name: Host -- note that the firewall was left alone
+  ansible.builtin.debug:
+    msg: >-
+      No active ufw on {{ inventory_hostname }}; game ports need no rule. This role never
+      enables a firewall -- see the comment in roles/game_host/tasks/main.yml.
+  when: >-
+    {{ not (lanparty_ufw.rc == 0 and 'Status: active' in lanparty_ufw.stdout) }}
