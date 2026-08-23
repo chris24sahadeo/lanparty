@@ -12,6 +12,7 @@
 *.pk3
 baseq3/
 baseq3.zip
+.gamedata/
 
 # Anything with a password in it.
 secrets/

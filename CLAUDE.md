@@ -75,6 +75,30 @@ accordingly.
 
 ## Game data never enters git
 
+**This has been asked and the answer is settled.** `pak0.pk3` is retail id Software data
+and is not licensed for redistribution -- Debian ships `game-data-packager`, a tool that
+builds a package from the user's own copy, precisely so it never has to host the copy.
+This repo is public, so committing it would be republishing commercial content under the
+owner's name. It also cannot work mechanically: GitHub rejects any file over 100 MB, the
+archive is ~637 MB, and Git LFS's free tier is 1 GB of storage and 1 GB of bandwidth a
+month -- about one clone.
+
+The goal behind the request -- nobody typing a path -- is met instead by
+`roles/quake3_common/files/find-game-data.sh`, which searches the places the data really
+lives and uses the first hit. If someone wants the data version-controlled, a PRIVATE
+repo or a release asset on one is the route; do not move it here.
+
+## Shell logic goes in files/, not inline
+
+`roles/quake3_common/files/find-game-data.sh` is a script rather than an inline `shell:`
+task for a concrete reason: Ansible runs `split_args()` over a free-form shell blob
+looking for `chdir=` and friends, and that parse dies on an unbalanced quote -- including
+an apostrophe inside a comment. The error it gives ("failed at splitting arguments, either
+an unbalanced jinja2 block or quotes") points at the task, not the apostrophe. A file has
+no such hazard, and shellcheck can read it.
+
+### Details
+
 The repo is public. `pak0.pk3` is retail id Software data. `.gitignore` blocks `*.pk3`,
 `baseq3.zip` and `baseq3/`; keep it that way. Passwords too -- `lanparty_quake3_rcon_password`
 ships as `changeme` and a real one is passed with `-e` or vaulted.

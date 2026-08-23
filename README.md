@@ -12,6 +12,36 @@ Game-agnostic: Quake III Arena is the first game, not the only one.
 
 ---
 
+## Quick start
+
+```bash
+git clone git@github.com:chris24sahadeo/lanparty.git ~/lanparty
+cd ~/lanparty
+
+# 1. List the machines. One server, N clients, two addresses each.
+$EDITOR inventory/hosts.yml
+
+# 2. Check the network before installing anything. Changes nothing.
+./bootstrap.sh --tags preflight
+
+# 3. Provision everything.
+./bootstrap.sh
+```
+
+Then on any machine: **`q`** to play. `q --menu` to change settings, `q --help` for the rest.
+
+**You do not point it at the game data.** It looks in `~/Downloads/baseq3.zip`,
+`.gamedata/` next to the repo, and any Steam, GOG or mounted-disc install, and uses the
+first copy it finds -- on the control node only, since Ansible pushes it to everyone else.
+If none of those has it, the run stops and lists exactly where to drop a copy. See
+[Game data](#game-data).
+
+`bootstrap.sh` builds an in-tree virtualenv on first run and passes every argument through
+to `ansible-playbook`, so `--check`, `--diff`, `--limit` and `--tags` all work.
+Useful tags: `preflight`, `host`, `server`, `client`.
+
+---
+
 ## Why not just play over Tailscale
 
 It would work, and it would be worse in two specific ways.
@@ -26,39 +56,6 @@ It would work, and it would be worse in two specific ways.
    by hand all evening.
 
 `roles/lan_preflight` checks, per machine, that this has actually been avoided.
-
----
-
-## Quick start
-
-```bash
-git clone git@github.com:chris24sahadeo/lanparty.git ~/lanparty
-cd ~/lanparty
-
-# 1. Point the game-data variable at your copy of the Quake III data.
-#    See "Game data" below -- it is not, and cannot be, in this repo.
-$EDITOR group_vars/all.yml
-
-# 2. List the machines. One server, N clients, two addresses each.
-$EDITOR inventory/hosts.yml
-
-# 3. Check the network before installing anything. Changes nothing.
-./bootstrap.sh --tags preflight
-
-# 4. Provision everything.
-./bootstrap.sh
-```
-
-Then on any client: **`q`**, or the longer `lanparty-quake3`, or "Quake III Arena (LAN
-party)" in the applications menu. The short name is a symlink in `/usr/local/bin` rather
-than a shell alias -- so it works in any shell, over ssh, and from the desktop entry, and
-nothing has to write into your `~/.zshrc`. Change it with `lanparty_quake3_alias`, or set
-that to `""` to skip it.
-
-`bootstrap.sh` builds an in-tree virtualenv on first run and passes every argument through
-to `ansible-playbook`, so `--check`, `--diff`, `--limit`, `--tags` all work.
-
-Useful tags: `preflight`, `host`, `server`, `client`.
 
 ---
 
@@ -95,13 +92,26 @@ subnets.
 `pak0.pk3` is retail id Software data. It is not redistributable, this repo is public, and
 `.gitignore` blocks `*.pk3` and `baseq3.zip` so it cannot be committed by accident.
 
-Point `lanparty_quake3_baseq3_src` at a zip containing `baseq3/pak0.pk3`, taken from a
-retail CD, a Steam install (appid 2200), or GOG. **Only the control node needs it** --
-Ansible pushes it to every machine, so nobody carries a CD around the office.
+**Nothing needs configuring.** The control node is searched, in this order, and the first
+hit wins:
 
-Set `lanparty_quake3_baseq3_sha256` to match, or `""` to skip the check. Getting this
-wrong fails the run with a written explanation rather than producing a server nobody can
-join.
+| | |
+| --- | --- |
+| `<repo>/.gamedata/baseq3.zip` | a copy kept with the repo -- gitignored |
+| `~/Downloads/baseq3.zip`, `~/baseq3.zip`, `~/Games/baseq3.zip` | a zip containing `baseq3/*.pk3` |
+| `<repo>/.gamedata/baseq3/` | loose `.pk3` files |
+| `~/.steam/steam/steamapps/common/Quake 3 Arena/baseq3` | Steam, appid 2200 -- no copying needed |
+| `~/.local/share/Steam/...`, `~/.steam/root/...` | other Steam layouts |
+| `~/GOG Games/Quake III Arena/baseq3` | GOG |
+| `/media/$USER/*`, `/mnt/*`, other-drive Steam libraries | a mounted retail CD |
+
+Find nothing and the run stops with that list, rather than half-installing. **Only the
+control node needs a copy** -- Ansible pushes it to every other machine, so one copy in
+the room is enough.
+
+Override the search with `lanparty_quake3_baseq3_src`. Enforce a specific archive with
+`lanparty_quake3_baseq3_sha256`, empty by default because several legal copies exist and
+a checksum that rejects a good one is worse than no checksum.
 
 ---
 

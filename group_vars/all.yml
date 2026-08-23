@@ -33,14 +33,24 @@ lanparty_max_rtt_ms: 5
 # ---------------------------------------------------------------------------------------
 # QUAKE III ARENA -- game data
 # ---------------------------------------------------------------------------------------
-# Path ON THE CONTROL NODE to the baseq3 archive. Retail id Software data: not
-# redistributable, so it is never committed -- .gitignore blocks *.pk3 and baseq3.zip.
-# Ansible reads it here and pushes it to every machine, so only the control node needs it.
-lanparty_quake3_baseq3_src: "{{ lookup('env', 'HOME') }}/Downloads/baseq3.zip"
+# LEAVE THIS EMPTY. Empty means "go and find it", and roles/quake3_common searches the
+# places the data actually lives -- ~/Downloads/baseq3.zip, the repo's own .gamedata/, a
+# Steam or GOG install, a mounted disc -- and uses the first hit. Nobody should have to
+# type a path to make this work.
+#
+# Retail id Software data is not redistributable, so it is never committed; .gitignore
+# blocks *.pk3, baseq3.zip and .gamedata/. Only the CONTROL NODE needs a copy, because
+# Ansible pushes whatever it finds to every other machine.
+#
+# Set it to an absolute path only to override the search.
+lanparty_quake3_baseq3_src: ""
 
-# sha256 of that archive. Set to "" to skip the check; leaving it set means a truncated or
-# swapped download fails loudly instead of producing a server nobody can join.
-lanparty_quake3_baseq3_sha256: "bd543781e517ff1eff6ae2a4a602c6e0f450bcfc3d3424d9e12f86266f82b302"
+# sha256 of the archive, when you want one enforced. Empty by default because with the
+# search enabled the file could legitimately be any of several valid copies, and a
+# checksum that rejects a perfectly good one is worse than no checksum. Pin it if your
+# party is standardising on one archive:
+#   bd543781e517ff1eff6ae2a4a602c6e0f450bcfc3d3424d9e12f86266f82b302
+lanparty_quake3_baseq3_sha256: ""
 
 # Where the .pk3 files land. /usr/lib/quake3/base/baseq3 is not arbitrary: Debian's
 # ioquake3 package pre-creates that exact directory for game data, and BOTH AppArmor

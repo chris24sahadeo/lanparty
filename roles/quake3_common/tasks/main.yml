@@ -31,38 +31,95 @@
   become: true
 
 # ---------------------------------------------------------------------------------------
-# GAME DATA.
+# FINDING THE GAME DATA, WITHOUT ANYONE HAVING TO SAY WHERE IT IS.
 #
-# pak0.pk3 is retail id Software data and is not redistributable, so it is not in this
-# repo and never will be -- .gitignore blocks *.pk3 and baseq3.zip. The archive lives on
-# the CONTROL NODE only; Ansible pushes it from there to each machine, so nobody has to
-# carry a CD around the office.
+# pak0.pk3 is retail id Software data. It is not redistributable, so it is not in this
+# repo and cannot be -- that is why Debian ships game-data-packager, a tool that builds a
+# package from YOUR copy, rather than shipping the copy.
+#
+# What we can do is stop making a human type a path. This searches the places the data
+# actually lives on a machine that owns the game, in order, and uses the first hit. Only
+# the CONTROL NODE needs it: Ansible pushes what it finds to every other machine, so one
+# copy in the room is enough.
+#
+# Set lanparty_quake3_baseq3_src to skip the search entirely.
 # ---------------------------------------------------------------------------------------
-- name: Quake3 -- check the game data archive exists on the control node
-  ansible.builtin.stat:
-    path: "{{ lanparty_quake3_baseq3_src }}"
-    checksum_algorithm: sha256
-    get_checksum: "{{ lanparty_quake3_baseq3_sha256 | length > 0 }}"
-  register: lanparty_baseq3_src
+- name: Quake3 -- find the game data
+  ansible.builtin.command:
+    argv:
+      - "{{ role_path }}/files/find-game-data.sh"
+      - "{{ playbook_dir }}"
+  register: lanparty_data_search
   delegate_to: localhost
   run_once: true
   changed_when: false
+  failed_when: false
+  when: lanparty_quake3_baseq3_src | length == 0
 
-- name: Quake3 -- fail clearly when the game data is missing or wrong
+- name: Quake3 -- settle on where the game data is coming from
+  ansible.builtin.set_fact:
+    # "zip" means unarchive it; "dir" means copy the pk3 files out of it.
+    lanparty_data_kind: >-
+      {{ 'zip' if lanparty_quake3_baseq3_src | length > 0
+         else ((lanparty_data_search.stdout | default('') | trim).split('\t')[0]
+               if (lanparty_data_search.stdout | default('') | trim) | length > 0 else '') }}
+    lanparty_data_path: >-
+      {{ lanparty_quake3_baseq3_src if lanparty_quake3_baseq3_src | length > 0
+         else ((lanparty_data_search.stdout | default('') | trim).split('\t')[1]
+               if '\t' in (lanparty_data_search.stdout | default('') | trim) else '') }}
+  run_once: true
+
+- name: Quake3 -- say what was found, or explain what is missing
   ansible.builtin.assert:
-    that:
-      - lanparty_baseq3_src.stat.exists
-      - lanparty_quake3_baseq3_sha256 | length == 0
-        or lanparty_baseq3_src.stat.checksum == lanparty_quake3_baseq3_sha256
-    fail_msg: >-
-      Quake III game data not usable at {{ lanparty_quake3_baseq3_src }}
-      ({{ 'file not found' if not lanparty_baseq3_src.stat.exists else 'sha256 mismatch' }}).
-      This is retail data the repo cannot ship. Point lanparty_quake3_baseq3_src at your
-      copy of baseq3.zip, or at a zip containing baseq3/pak0.pk3 taken from a retail CD,
-      Steam (appid 2200) or GOG. Update lanparty_quake3_baseq3_sha256 to match, or set it
-      to "" to skip the check.
+    that: lanparty_data_path | length > 0
+    success_msg: "Game data: {{ lanparty_data_path }} ({{ lanparty_data_kind }})"
+    fail_msg: |-
+      No Quake III game data found on the control node.
+
+      pak0.pk3 is retail data that this repo cannot ship. Put a copy anywhere below and
+      re-run -- nothing needs configuring, the search finds it:
+
+        ~/Downloads/baseq3.zip                  a zip containing baseq3/*.pk3
+        {{ playbook_dir }}/.gamedata/baseq3.zip   same, kept with the repo (gitignored)
+        {{ playbook_dir }}/.gamedata/baseq3/      or the loose .pk3 files
+
+      Already own it? These are searched too, and need no copying at all:
+
+        ~/.steam/steam/steamapps/common/Quake 3 Arena/baseq3   (Steam, appid 2200)
+        ~/.local/share/Steam/steamapps/common/Quake 3 Arena/baseq3
+        ~/GOG Games/Quake III Arena/baseq3
+        a mounted retail CD under /media/{{ lookup('env', 'USER') }}/
+
+      Only the control node needs it. Ansible pushes it to every other machine.
     quiet: true
   run_once: true
+
+- name: Quake3 -- verify the checksum, when one is pinned
+  ansible.builtin.stat:
+    path: "{{ lanparty_data_path }}"
+    checksum_algorithm: sha256
+    get_checksum: true
+  register: lanparty_data_stat
+  delegate_to: localhost
+  run_once: true
+  changed_when: false
+  when:
+    - lanparty_quake3_baseq3_sha256 | length > 0
+    - lanparty_data_kind == 'zip'
+
+- name: Quake3 -- fail on a checksum mismatch
+  ansible.builtin.assert:
+    that: lanparty_data_stat.stat.checksum == lanparty_quake3_baseq3_sha256
+    fail_msg: >-
+      {{ lanparty_data_path }} does not match lanparty_quake3_baseq3_sha256. Either the
+      file differs from the one this was pinned against -- which is fine, several legal
+      copies exist -- or it is truncated. Update the variable, or set it to "" to accept
+      whatever is found.
+    quiet: true
+  run_once: true
+  when:
+    - lanparty_quake3_baseq3_sha256 | length > 0
+    - lanparty_data_kind == 'zip'
 
 - name: Quake3 -- create the game data directory
   ansible.builtin.file:
@@ -80,9 +137,9 @@
     path: "{{ lanparty_quake3_basepath }}/baseq3/pak0.pk3"
   register: lanparty_pak0
 
-- name: Quake3 -- unpack the game data
+- name: Quake3 -- unpack the game data from an archive
   ansible.builtin.unarchive:
-    src: "{{ lanparty_quake3_baseq3_src }}"
+    src: "{{ lanparty_data_path }}"
     dest: "{{ lanparty_quake3_basepath }}"
     # The archive was made on macOS, so it carries a __MACOSX/ tree of AppleDouble
     # resource forks. They are not pk3 files; leaving them out keeps the sv_pure
@@ -108,7 +165,36 @@
     # 0644 was reaching for.
     mode: "u=rwX,g=rX,o=rX"
   become: true
-  when: not lanparty_pak0.stat.exists
+  when:
+    - not lanparty_pak0.stat.exists
+    - lanparty_data_kind == 'zip'
+
+# The other shape: the data is already unpacked somewhere -- a Steam or GOG install, or a
+# mounted disc. Copy the pk3 files out rather than making anyone zip them up first.
+- name: Quake3 -- list the pk3 files in an existing install
+  ansible.builtin.find:
+    paths: "{{ lanparty_data_path }}"
+    patterns: "*.pk3"
+  register: lanparty_found_paks
+  delegate_to: localhost
+  run_once: true
+  changed_when: false
+  when: lanparty_data_kind == 'dir'
+
+- name: Quake3 -- copy the game data from an existing install
+  ansible.builtin.copy:
+    src: "{{ item.path }}"
+    dest: "{{ lanparty_quake3_basepath }}/baseq3/{{ item.path | basename }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ lanparty_found_paks.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  become: true
+  when:
+    - not lanparty_pak0.stat.exists
+    - lanparty_data_kind == 'dir'
 
 - name: Quake3 -- confirm the retail data is present
   ansible.builtin.stat:
