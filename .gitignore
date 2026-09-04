@@ -25,3 +25,9 @@ Xonotic/
 secrets/
 *.vault
 vault-password
+# Per-host sudo passwords, written by ./add-machine.sh --sudo-pass. These ARE encrypted, and
+# an ansible-vault file is normally safe to commit -- this repo is public, so they are
+# blocked anyway. The cost of being wrong once (a plaintext password pushed under the
+# owner's name, in history forever) is far worse than re-entering a password per machine,
+# and party machines get reimaged between events regardless.
+host_vars/

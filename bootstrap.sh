@@ -122,14 +122,32 @@ if [[ "$PREFLIGHT_ONLY" == false ]] && ! sudo_works_without_a_terminal; then
       ./bootstrap.sh $*
       # or give this user passwordless sudo for the run
       #   sudo visudo   ->   $USER ALL=(ALL) NOPASSWD: ALL
-      # or hand the password to Ansible itself, vaulted -- the only route that does not
-      # depend on a sudo timestamp, which is scoped to a terminal this has none of
-      #   ./bootstrap.sh $* -e @secrets/become.yml --vault-password-file vault-password
+      # or store each machine's sudo password, vaulted -- the only route that works when
+      # the machines do not share one password, and the only one that needs no terminal
+      #   ./add-machine.sh --name <existing-host> --sudo-pass
   A --tags preflight run needs no sudo and works anywhere."
   fi
   log "Some tasks need sudo; you will be prompted once."
   BECOME_ARGS+=(--ask-become-pass)
 fi
 
+# --- vaulted per-host sudo passwords -----------------------------------------------------
+# host_vars/<host>.yml holds one machine's ansible_become_password, encrypted. Ansible needs
+# the key to read them, and asking for it interactively would defeat the point -- the whole
+# reason those files exist is that --ask-become-pass sends ONE password to every machine and
+# a party is a pile of machines with different owners.
+#
+# The file is gitignored. Vault here is protecting a PUBLIC repo from a committed password,
+# not protecting the laptop from its owner -- anyone with the working directory has both
+# halves. Say that plainly rather than implying more.
+VAULT_ARGS=()
+if [[ -f "$REPO_DIR/vault-password" ]]; then
+  VAULT_ARGS+=(--vault-password-file "$REPO_DIR/vault-password")
+elif compgen -G "$REPO_DIR/host_vars/*.yml" >/dev/null 2>&1 \
+     && grep -lq 'ANSIBLE_VAULT' "$REPO_DIR"/host_vars/*.yml 2>/dev/null; then
+  die "host_vars/ has vaulted files but there is no vault-password file to open them.
+  Recreate it, or delete the host_vars entries and use --ask-become-pass instead."
+fi
+
 log "Running site.yml"
-exec "$VENV/bin/ansible-playbook" site.yml "${BECOME_ARGS[@]}" "$@"
+exec "$VENV/bin/ansible-playbook" site.yml "${BECOME_ARGS[@]}" "${VAULT_ARGS[@]}" "$@"
