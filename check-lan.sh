@@ -19,10 +19,12 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
-# Same reason as bootstrap.sh: this is the highest-precedence config source, so the in-tree
-# collections_path and local_tmp apply no matter where this is called from. See the header
-# of ansible.cfg for why that matters on this workstation.
-export ANSIBLE_CONFIG="$REPO_DIR/ansible.cfg"
+# Exports ANSIBLE_CONFIG and provides the vault handling. Sourced rather than repeated:
+# this script did NOT have that handling, and the moment a real host_vars/<host>.yml
+# existed it died with "Attempting to decrypt but no vault secrets found" -- Ansible
+# auto-loads host_vars for every run, encrypted or not.
+# shellcheck source=lanparty-lib.sh
+source "$REPO_DIR/lanparty-lib.sh"
 
 VENV="$REPO_DIR/.venv"
 [[ -x "$VENV/bin/ansible-playbook" ]] || {
@@ -30,4 +32,7 @@ VENV="$REPO_DIR/.venv"
   exit 1
 }
 
-exec "$VENV/bin/ansible-playbook" check-lan.yml "$@"
+# No secrets/ here: this playbook diagnoses the network and touches no password.
+lanparty_vault_args
+
+exec "$VENV/bin/ansible-playbook" check-lan.yml "${VAULT_ARGS[@]}" "$@"

@@ -23,13 +23,13 @@ cd "$REPO_DIR"
 ANSIBLE_CORE_VERSION="2.21.2"
 VENV="$REPO_DIR/.venv"
 
-# The single most important line in this repo. ANSIBLE_CONFIG is the highest-precedence
-# config source, so exporting it here means our collections_path and local_tmp apply no
-# matter what the caller's CWD or environment looks like.
-export ANSIBLE_CONFIG="$REPO_DIR/ansible.cfg"
+# Exports ANSIBLE_CONFIG -- the single most important line in this repo -- and provides the
+# vault and secrets handling that every entry point here needs identically.
+# shellcheck source=lanparty-lib.sh
+source "$REPO_DIR/lanparty-lib.sh"
 
-log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
-die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+log() { lanparty_log "$@"; }
+die() { lanparty_die "$@"; }
 
 # --- ansible-core, in-tree -------------------------------------------------------------
 # Stock `python3 -m venv`, NOT `uv tool install`. ~/.local/bin/ansible-playbook is a uv
@@ -131,43 +131,9 @@ if [[ "$PREFLIGHT_ONLY" == false ]] && ! sudo_works_without_a_terminal; then
   BECOME_ARGS+=(--ask-become-pass)
 fi
 
-# --- vaulted per-host sudo passwords -----------------------------------------------------
-# host_vars/<host>.yml holds one machine's ansible_become_password, encrypted. Ansible needs
-# the key to read them, and asking for it interactively would defeat the point -- the whole
-# reason those files exist is that --ask-become-pass sends ONE password to every machine and
-# a party is a pile of machines with different owners.
-#
-# The file is gitignored. Vault here is protecting a PUBLIC repo from a committed password,
-# not protecting the laptop from its owner -- anyone with the working directory has both
-# halves. Say that plainly rather than implying more.
-VAULT_ARGS=()
-if [[ -f "$REPO_DIR/vault-password" ]]; then
-  VAULT_ARGS+=(--vault-password-file "$REPO_DIR/vault-password")
-elif compgen -G "$REPO_DIR/host_vars/*.yml" >/dev/null 2>&1 \
-     && grep -lq 'ANSIBLE_VAULT' "$REPO_DIR"/host_vars/*.yml 2>/dev/null; then
-  die "host_vars/ has vaulted files but there is no vault-password file to open them.
-  Recreate it, or delete the host_vars entries and use --ask-become-pass instead."
-fi
-
-# --- secrets ----------------------------------------------------------------------------
-# secrets/*.yml override the placeholder passwords in group_vars/all.yml -- rcon today,
-# whatever a future game needs after that. Loaded with -e, which is the HIGHEST precedence
-# source, so a real password beats the shipped "changeme" without editing a tracked file.
-#
-# -e IS THE RIGHT SCOPE HERE and the wrong one for sudo. An rcon password belongs to the
-# SERVER, so one value for the whole run is correct; a sudo password belongs to a machine,
-# which is why those live in host_vars/ instead. See ./add-machine.sh --sudo-pass.
-#
-# WHY NOT ON THE COMMAND LINE. `./bootstrap.sh -e lanparty_quake3_rcon_password=hunter2`
-# works, and puts the password in shell history and in the process list, where `ps` shows
-# it to every other user on the machine for the length of the run. A file does neither.
-SECRET_ARGS=()
-if compgen -G "$REPO_DIR/secrets/*.yml" >/dev/null 2>&1; then
-  for secret in "$REPO_DIR"/secrets/*.yml; do
-    SECRET_ARGS+=(-e "@$secret")
-  done
-  log "Loading $(( ${#SECRET_ARGS[@]} / 2 )) file(s) from secrets/"
-fi
+lanparty_vault_args
+lanparty_secret_args
+(( ${#SECRET_ARGS[@]} )) && log "Loading $(( ${#SECRET_ARGS[@]} / 2 )) file(s) from secrets/"
 
 log "Running site.yml"
 exec "$VENV/bin/ansible-playbook" site.yml \
