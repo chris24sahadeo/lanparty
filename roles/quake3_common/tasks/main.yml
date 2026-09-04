@@ -174,12 +174,29 @@
     argv:
       - "{{ role_path }}/files/find-game-data.sh"
       - "{{ playbook_dir }}"
-  register: lanparty_data_search
+  # ITS OWN REGISTER NAME, NOT lanparty_data_search. A SKIPPED task still registers a
+  # result, and that result has no stdout_lines -- so reusing the name would overwrite the
+  # successful first search with a skip result on every run that did NOT need to download
+  # anything, which is every run once the archive is local. The symptom was "No Quake III
+  # game data found" with the file sitting right there.
+  register: lanparty_data_refind
   delegate_to: localhost
   run_once: true
   changed_when: false
   failed_when: false
   when: lanparty_data_fetch
+
+- name: Quake3 -- settle on where the game data is coming from
+  ansible.builtin.set_fact:
+    # WHICH SEARCH RESULT TO BELIEVE. The re-search after an rclone download has its own
+    # register name (see the task above for why), so pick it only when it actually ran and
+    # produced output; otherwise the original search stands. Resolved once, here, so the
+    # two facts below cannot disagree about which result they read.
+    lanparty_data_lines: >-
+      {{ (lanparty_data_refind.stdout_lines | default([]))
+         if (lanparty_data_refind.stdout_lines | default([])) | length >= 2
+         else (lanparty_data_search.stdout_lines | default([])) }}
+  run_once: true
 
 - name: Quake3 -- settle on where the game data is coming from
   ansible.builtin.set_fact:
@@ -196,12 +213,10 @@
     # "zip" means unarchive it; "dir" means copy the pk3 files out of it.
     lanparty_data_kind: >-
       {{ 'zip' if lanparty_quake3_baseq3_src | length > 0
-         else ((lanparty_data_search.stdout_lines | default([]))[0]
-               if (lanparty_data_search.stdout_lines | default([])) | length >= 2 else '') }}
+         else (lanparty_data_lines[0] if lanparty_data_lines | length >= 2 else '') }}
     lanparty_data_path: >-
       {{ lanparty_quake3_baseq3_src if lanparty_quake3_baseq3_src | length > 0
-         else ((lanparty_data_search.stdout_lines | default([]))[1]
-               if (lanparty_data_search.stdout_lines | default([])) | length >= 2 else '') }}
+         else (lanparty_data_lines[1] if lanparty_data_lines | length >= 2 else '') }}
   run_once: true
 
 - name: Quake3 -- say what was found, or explain what is missing
