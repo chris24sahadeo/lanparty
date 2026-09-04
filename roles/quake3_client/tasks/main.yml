@@ -8,18 +8,25 @@
          | default(hostvars[groups['game_server'][0]]['ansible_facts']['default_ipv4']['address']) }}
 
 # ---------------------------------------------------------------------------------------
-# RESOLUTION, DETECTED RATHER THAN ASSUMED.
+# RESOLUTION: ONE MODE EVERYWHERE, CLAMPED DOWN WHERE THE PANEL CANNOT SHOW IT.
 #
-# Rendering at anything other than a fixed-pixel panel's native mode means the display
-# scales every frame, which is blurry -- and on a 3:2 laptop panel a 16:9 mode also gets
-# pillarboxed. A LAN party is a pile of different machines, so the right resolution is a
-# per-host fact, not a constant.
+# lanparty_quake3_width/_height decide the mode -- 1920x1080 by default, see group_vars for
+# why that beats each machine's own native mode at a party. Detection still runs, for one
+# job only: a panel that is NARROWER than the requested mode cannot display it, and asking
+# a 1366x768 laptop for 1080p fullscreen gets a black screen or a driver-scaled mess rather
+# than a smaller picture. So we detect, and clamp down when we have to.
+#
+# With both variables empty the clamp is the whole answer and every machine gets its own
+# native mode, which is the behaviour this role used to have unconditionally.
 #
 # /sys/class/drm is read instead of xrandr because it needs no X display, no package, and
 # works over a plain SSH connection with nobody logged in -- which is how every machine
-# except this one gets provisioned.
+# except this one gets provisioned. Note it reports the first CONNECTED output, which on a
+# docked laptop is usually the external monitor rather than the built-in panel; that is
+# fine for a "can it do 1080p" test and is exactly why it is no longer used to pick the
+# mode outright.
 # ---------------------------------------------------------------------------------------
-- name: Quake3 client -- detect the display's native resolution
+- name: Quake3 client -- detect a connected display's preferred mode
   ansible.builtin.shell: |
     set -o pipefail
     for c in /sys/class/drm/card*-*/; do
@@ -33,24 +40,48 @@
   register: lanparty_native_mode
   changed_when: false
   failed_when: false
-  when:
-    - lanparty_quake3_width | length == 0
-    - lanparty_quake3_height | length == 0
+
+- name: Quake3 client -- split the detected mode into width and height
+  ansible.builtin.set_fact:
+    # Both empty when nothing was detected -- a headless machine, or a laptop with the lid
+    # shut. That is not an error; it just means there is nothing to clamp against.
+    lanparty_native_w: >-
+      {{ (lanparty_native_mode.stdout | default('') | trim).split('x')[0]
+         if 'x' in (lanparty_native_mode.stdout | default('') | trim) else '' }}
+    lanparty_native_h: >-
+      {{ (lanparty_native_mode.stdout | default('') | trim).split('x')[1]
+         if 'x' in (lanparty_native_mode.stdout | default('') | trim) else '' }}
+
+- name: Quake3 client -- decide whether the panel can show the requested mode
+  ansible.builtin.set_fact:
+    # Width alone is the test. Every mode in play is wider than it is tall, and a panel
+    # narrower than the request cannot be showing a taller one.
+    lanparty_gfx_clamp: >-
+      {{ lanparty_native_w | length > 0
+         and lanparty_quake3_width | length > 0
+         and (lanparty_native_w | int) < (lanparty_quake3_width | int) }}
 
 - name: Quake3 client -- settle on a resolution
   ansible.builtin.set_fact:
+    # Detected wins in two cases: nothing was requested, or what was requested does not fit.
     lanparty_gfx_width: >-
-      {{ lanparty_quake3_width if lanparty_quake3_width | length > 0
-         else (lanparty_native_mode.stdout | default('') | trim).split('x')[0] | default('', true) }}
+      {{ lanparty_native_w
+         if (lanparty_gfx_clamp | bool or lanparty_quake3_width | length == 0)
+         else lanparty_quake3_width }}
     lanparty_gfx_height: >-
-      {{ lanparty_quake3_height if lanparty_quake3_height | length > 0
-         else ((lanparty_native_mode.stdout | default('') | trim).split('x')[1]
-               if 'x' in (lanparty_native_mode.stdout | default('') | trim) else '') }}
+      {{ lanparty_native_h
+         if (lanparty_gfx_clamp | bool or lanparty_quake3_height | length == 0)
+         else lanparty_quake3_height }}
 
 - name: Quake3 client -- report the resolution in use
   ansible.builtin.debug:
     msg: >-
-      {{ ('Rendering at ' ~ lanparty_gfx_width ~ 'x' ~ lanparty_gfx_height ~ ' (native).')
+      {{ ('Rendering at ' ~ lanparty_gfx_width ~ 'x' ~ lanparty_gfx_height
+          ~ (' -- clamped down from ' ~ lanparty_quake3_width ~ 'x' ~ lanparty_quake3_height
+             ~ ', which this display cannot show.'
+             if lanparty_gfx_clamp | bool
+             else (' (this display reports ' ~ lanparty_native_w ~ 'x' ~ lanparty_native_h ~ ').'
+                   if lanparty_native_w | length > 0 else '.')))
          if lanparty_gfx_width | length > 0
          else 'No display mode detected; falling back to r_mode -2, the desktop resolution.' }}
 

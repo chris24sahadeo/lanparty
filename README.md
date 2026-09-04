@@ -409,3 +409,17 @@ its own virtualenv rather than touching the shared `~/.local/bin/ansible*` shims
 - Server tick is `sv_fps 40` and clients ask for `snaps 40`. The stock 20 is a dial-up
   default; the server clamps `snaps` to `sv_fps`, so asking for more than the server runs
   silently gives you less.
+- **Every machine renders at 1920x1080**, not at its own native mode, and clamps down only
+  where a panel cannot show 1080p. One resolution means what you learn on one machine
+  transfers to the next; it also stops a docked laptop quietly being configured for its 4K
+  monitor. `lanparty_quake3_width` / `_height`, both `""` to go back to per-machine
+  detection.
+- **`com_maxfps 125` and `pmove_fixed 1` are doing different jobs.** Quake III integrates
+  movement in whole milliseconds once per rendered frame, so jump height and strafe
+  acceleration depend on frame rate; 125 is canonical because 1000/125 is exactly 8 ms.
+  But `com_maxfps` is only a request, and a laptop that dips to 90 in a firefight gets
+  different physics from the machine beside it. `pmove_fixed 1` with `pmove_msec 8` makes
+  the server step movement at a fixed 125 Hz for everyone regardless of frame rate -- the
+  same physics, now guaranteed. It costs up to 8 ms of input quantisation, which is the
+  trade this repo makes on purpose for mismatched party hardware. `lanparty_quake3_pmove_fixed: 0`
+  restores stock behaviour. See [`docs/quake3-reference.md`](docs/quake3-reference.md).

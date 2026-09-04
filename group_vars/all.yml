@@ -102,6 +102,36 @@ lanparty_quake3_sv_fps: 40
 # because Ansible pushes byte-identical data everywhere; it is also what stops one person
 # with a modified pak from having different hitboxes.
 lanparty_quake3_sv_pure: 1
+# ---------------------------------------------------------------------------------------
+# MOVEMENT PHYSICS. THE ONE SETTING THAT DECIDES WHETHER THE GAME IS FAIR.
+# ---------------------------------------------------------------------------------------
+# Quake III integrates player movement in whole milliseconds, once per rendered frame, so
+# JUMP HEIGHT AND STRAFE ACCELERATION DEPEND ON YOUR FRAME RATE. That is not a bug being
+# worked around, it is how idTech3 works, and it is why com_maxfps 125 became the community
+# standard: 1000/125 is exactly 8 ms, so the rounding lands the same way every frame.
+#
+# The problem at a LAN party is that com_maxfps 125 is a REQUEST. A machine that dips to 90
+# in a firefight gets different jumps from the machine next to it that holds 125, and the
+# person who cannot make a jump they have made a thousand times has no way to tell that the
+# reason was frame rate.
+#
+# pmove_fixed 1 removes the coupling entirely: the server steps movement at a fixed
+# pmove_msec interval regardless of what any client's frame rate is doing. pmove_msec 8 is
+# 125 Hz, so the physics are IDENTICAL to a machine perfectly holding com_maxfps 125 -- the
+# muscle memory everyone already has -- except now everyone gets it, including whoever
+# brought the oldest laptop.
+#
+# WHAT IT COSTS: input is quantised to the 8 ms step, so up to 8 ms of the delay between
+# your mouse moving and the server acting on it. Some VQ3 purists dislike it for exactly
+# that reason. On mismatched party hardware, everyone having the same physics is worth more
+# than 8 ms. Set to 0 for stock frame-rate-coupled movement.
+#
+# The game module clamps pmove_msec to [8, 33]; 8 is the floor and the only value that
+# matches 125 fps physics. It is a game-module cvar (qagame), which is why it lives in
+# server.cfg rather than on the engine command line.
+lanparty_quake3_pmove_fixed: 1
+lanparty_quake3_pmove_msec: 8
+
 lanparty_quake3_maps:
   - q3dm6
   - q3dm7
@@ -131,14 +161,29 @@ lanparty_quake3_server_home: /var/games/quake3-server
 # ---------------------------------------------------------------------------------------
 # QUAKE III ARENA -- graphics
 # ---------------------------------------------------------------------------------------
-# Resolution is DETECTED PER MACHINE, not written down here. Leave these empty and the
-# client role reads the connected display's preferred mode out of /sys/class/drm. A LAN
-# party is a pile of different laptops and monitors; one hardcoded resolution is wrong on
-# most of them, and rendering at non-native resolution on a fixed-pixel panel means the
-# display scales every frame -- blurry, and on a 3:2 panel a 16:9 mode also gets pillared.
-# Set them to force a specific mode on every machine.
-lanparty_quake3_width: ""
-lanparty_quake3_height: ""
+# 1080p ON EVERY MACHINE. Not the panel's native mode, deliberately.
+#
+# This used to be empty, meaning "detect it", and the client role read the first connected
+# display's preferred mode out of /sys/class/drm. Two things were wrong with that at a
+# party. It picks whichever output the kernel enumerates first, which on a laptop docked to
+# an external monitor is the monitor -- one machine here was configured for 3840x2160, and
+# rendering a 1999 title at 4K spends frame time on pixels nobody is scoring frags with.
+# And it gives every machine a different resolution, so what you learn on one does not
+# transfer to the next.
+#
+# 1920x1080 is the competitive standard, it is identical everywhere, and it leaves the
+# largest headroom for holding com_maxfps 125 rock steady -- which is what actually matters
+# below, because Quake III's movement physics are coupled to frame rate.
+#
+# WHAT IT COSTS. On a fixed-pixel panel that is not 1920x1080, the display scales every
+# frame, which is softer than native; on a 3:2 laptop panel a 16:9 mode is also letterboxed.
+# That is a real trade and it is made on purpose: predictable and fast beats sharp.
+#
+# Detection still runs, but only to CLAMP DOWN -- a 1366x768 panel cannot show 1080p at all,
+# so it gets its own mode instead of a black screen. Set both to "" to go back to
+# per-machine native detection.
+lanparty_quake3_width: "1920"
+lanparty_quake3_height: "1080"
 
 # Which renderer. ioquake3 ships two and defaults to opengl2.
 #
@@ -219,3 +264,207 @@ lanparty_quake3_lan_cvars:
   # Explicit rather than inherited: the base config's cl_maxpackets change makes this the
   # matching half.
   - seta cl_packetdup "0"
+
+# ---------------------------------------------------------------------------------------
+# XONOTIC -- engine and game data
+# ---------------------------------------------------------------------------------------
+# Set lanparty_game: xonotic (top of this file) to provision this instead of Quake III.
+#
+# WHY THIS GAME IS FETCHED AND QUAKE III IS NOT. Everything above about finding a copy of
+# pak0.pk3, about rclone, about not committing game data, exists because Quake III's data
+# is retail id Software property. Xonotic has no such problem: the DarkPlaces engine is
+# GPL-2 and the art, maps, sounds and music are GPL / CC-BY-SA (Creative Commons
+# Attribution-ShareAlike). Upstream publishes one zip containing engine and data for every
+# platform, and a SHA-512 (Secure Hash Algorithm, 512-bit) beside it. So this role just
+# downloads it -- no search, no rclone, no USB stick.
+#
+# IT IS STILL NOT COMMITTED. Not for licensing -- for size. The archive is 1.18 GB and
+# GitHub rejects any file over 100 MB. .gitignore blocks it.
+lanparty_xonotic_version: "0.8.6"
+
+# Official mirror. dl.illwieckz.net and dl.unvanquished.net serve the identical file and
+# are listed on xonotic.org/download as the alternatives if this one is slow.
+lanparty_xonotic_url: "https://dl.xonotic.org/xonotic-{{ lanparty_xonotic_version }}.zip"
+
+# PINNED, AND UNLIKE QUAKE III THIS ONE IS NOT OPTIONAL. There is exactly one official
+# xonotic-0.8.6.zip, so a checksum here can only ever reject a corrupt or substituted
+# download -- never a legitimately different copy, which is the reason
+# lanparty_quake3_baseq3_sha256 is empty by default. Published at
+# https://dl.xonotic.org/xonotic-0.8.6.sha512 and verified against the downloaded file.
+#
+# SHA-512, not SHA-256, because that is the digest upstream actually publishes for 0.8.6.
+# Inventing a SHA-256 here would mean nobody could check it against anything.
+lanparty_xonotic_sha512: >-
+  cb39879e96f19abb2877588c2d50c5d3e64dd68153bec3dd1bebedf4d765e506afa419c28381d7005aed664cb1a042571c132b5b319e4308cab67745d996c2a6
+
+# Skip the download by pointing at a zip you already have. Empty means "use .gamedata/,
+# and fetch it there if it is missing".
+lanparty_xonotic_src: ""
+
+# WHERE IT LANDS, and why /opt rather than /usr/lib.
+#
+# Quake III goes under /usr/lib/quake3 because a Debian PACKAGE puts the engine there and
+# two AppArmor profiles are written against that path. Xonotic is not packaged in Ubuntu at
+# all -- there is no xonotic in main, universe or multiverse; `darkplaces` is the bare Quake
+# engine with none of Xonotic's data. What upstream ships is a self-contained directory
+# tree, and a self-contained add-on application tree is precisely what the FHS (Filesystem
+# Hierarchy Standard) reserves /opt for. No AppArmor profile exists for it, so nothing
+# constrains the choice the way it does for Quake III.
+#
+# Capital X because that is the directory name inside the archive. Renaming it would mean
+# the tree on disk no longer matches what upstream's own scripts and documentation describe.
+lanparty_xonotic_prefix: /opt/Xonotic
+
+# Paths inside the archive NOT to unpack. Every one of these is for another operating
+# system or another job, and none of it is reachable from anything this repo installs.
+#
+# This saves about 105 MB of disk on each machine and NOT ONE BYTE of transfer: Ansible
+# pushes the whole zip and unzips it on the far end, so the exclusions apply after the copy.
+# Worth doing anyway -- 105 MB of Windows binaries on a Linux box is 105 MB of things that
+# should never be there.
+#
+# The seven .pk3 files under data/ are deliberately kept whole, including the 125 MB
+# Nexuiz-compatibility set and the 110 MB music. Trimming those would mean the server can
+# only ever run maps that survived the trim, and finding that out mid-party is worse than
+# the disk.
+lanparty_xonotic_exclude:
+  # The macOS application bundle, including a whole embedded SDL2 framework. 27 MB.
+  - "Xonotic/Xonotic.app/*"
+  # Windows engine binaries, 32- and 64-bit, client and dedicated. 71 MB.
+  - "Xonotic/*.exe"
+  # The macOS dedicated server binary.
+  - "Xonotic/xonotic-osx-dedicated"
+  # Mapping and packaging tools, plus an rsync auto-updater we specifically do not want
+  # reaching out to the internet from a party machine.
+  - "Xonotic/misc/*"
+  # Source build machinery. There is no compiler on a party laptop and no reason for one.
+  - "Xonotic/Makefile"
+
+# ---------------------------------------------------------------------------------------
+# XONOTIC -- dedicated server
+# ---------------------------------------------------------------------------------------
+lanparty_xonotic_hostname: "Office LAN Party"
+# 26000 is the engine default, inherited from Quake -- DarkPlaces speaks a Quake-derived
+# protocol. Distinct from Quake III's 27960, so both servers can run side by side.
+lanparty_xonotic_port: 26000
+# Player slots INCLUDING spectators, which is the one way this differs from Quake III's
+# sv_maxclients.
+lanparty_xonotic_maxplayers: 16
+
+# Gametype identifier, not a number. dm deathmatch, tdm team deathmatch, ctf capture the
+# flag, ca clan arena, ft freeze tag, lms last man standing, ka keepaway, ons onslaught,
+# rc race, nb nexball, kh keyhunt, dom domination, as assault, inv invasion, cts complete
+# the stage.
+lanparty_xonotic_gametype: dm
+
+# -1 in Xonotic means "use whatever the map says", which is why these are named _override:
+# they replace the per-map value for every map and every gametype. Set either to -1 to hand
+# the decision back to the map, or 0 for no limit at all.
+lanparty_xonotic_fraglimit: 30
+lanparty_xonotic_timelimit: 15
+
+# Server frame interval in SECONDS, so smaller is faster -- the inverse of Quake III's
+# sv_fps, and an easy thing to get backwards. The shipped example is 0.0333333, which is
+# 30 frames a second. 0.0166667 is 60, which the shipped config itself names as the
+# "smoother gameplay, somewhat higher CPU" option. A LAN server is not CPU-starved and a
+# deathmatch is exactly where the extra frames show.
+lanparty_xonotic_sys_ticrate: "0.0166667"
+
+# Map rotation. Every name here is a real .bsp inside 0.8.6's maps pk3 -- CHECKED, because
+# the example list in the shipped server/server.cfg still names `oilrig`, which was dropped
+# from the game and would make the rotation skip an entry with no explanation.
+#
+# These six are the small-party deathmatch standards: two tight duel-ish arenas
+# (stormkeep, silentsiege), two mid-size (solarium, afterslime), one open (xoylent) and one
+# vertical (glowplant).
+lanparty_xonotic_maps:
+  - stormkeep
+  - solarium
+  - xoylent
+  - afterslime
+  - silentsiege
+  - glowplant
+
+# 0 plays lanparty_xonotic_maps in order; 1 picks at random. Order, so a party can be told
+# what is coming next.
+lanparty_xonotic_maplist_shuffle: 0
+
+# Bots to fill empty slots so the server is worth joining before everyone arrives, and the
+# skill they play at. Xonotic's scale runs 0-10; 8 is a genuinely hard bot and 4-5 is about
+# a competent human.
+lanparty_xonotic_minplayers: 4
+lanparty_xonotic_bot_skill: 5
+
+# Remote console password. Override on the command line for a real party:
+#   ./bootstrap.sh -e lanparty_xonotic_rcon_password=something
+# Never commit a real one -- this repo is public. Empty disables rcon entirely.
+lanparty_xonotic_rcon_password: "changeme"
+
+# System account the dedicated server runs as, and its userdir. The engine writes configs,
+# logs and downloaded content under <userdir>/data/, which is the only path the systemd unit
+# grants write access to.
+lanparty_xonotic_server_user: xonotic-server
+lanparty_xonotic_server_home: /var/games/xonotic-server
+
+# Short command name symlinked to the launcher. Same reasoning as lanparty_quake3_alias
+# above -- a symlink in /usr/local/bin, never a shell alias, because shell config on this
+# workstation belongs to chezmoi. `x` rather than `q` so both games can be installed.
+# Set to "" to skip it.
+lanparty_xonotic_alias: x
+
+# ---------------------------------------------------------------------------------------
+# XONOTIC -- graphics
+# ---------------------------------------------------------------------------------------
+# Same policy as Quake III's, and it earns its keep more here. Xonotic is a 2023 renderer,
+# not a 1999 one: a 4K panel really can drop it below its frame target, where Quake III
+# would not notice. Capping at 1080p everywhere means every machine in the room gets the
+# same picture at a frame rate that holds.
+#
+# Detection still runs, to CLAMP DOWN only -- a 1366x768 panel cannot display 1080p and
+# asking for it fullscreen gets a black screen rather than a smaller picture. Set both to ""
+# for per-machine native mode.
+lanparty_xonotic_width: "1920"
+lanparty_xonotic_height: "1080"
+
+# Effects preset applied on top of everything below. Xonotic ships these as `exec`-able
+# configs in its data pk3: omg, low, med, normal, high, ultra, ultimate. "normal" is the
+# game's own default; "high" is the honest setting for any GPU made this decade.
+# Set to "" to leave whatever the player already had.
+lanparty_xonotic_effects_preset: high
+
+lanparty_xonotic_gfx_cvars:
+  # VSYNC OFF, for the same reason as Quake III: it costs up to a whole frame of input
+  # latency to avoid tearing, and a deathmatch would rather have the frame.
+  - seta vid_vsync "0"
+  # Frame cap. Xonotic's physics are NOT frame-rate coupled the way Quake III's are, so
+  # unlike com_maxfps 125 this number is taste rather than muscle memory. 250 keeps input
+  # sampling fast without letting an idle menu spin the GPU at its thermal limit.
+  - seta cl_maxfps "250"
+  # Frame rate while the window is not focused. Stops an alt-tabbed game heating the laptop
+  # everyone else is waiting on.
+  - seta cl_maxidlefps "60"
+  # Frame counter, top right. At a party this is how an argument about whose machine is
+  # struggling gets settled in two seconds.
+  - seta showfps "1"
+
+# ---------------------------------------------------------------------------------------
+# XONOTIC -- client networking
+# ---------------------------------------------------------------------------------------
+# The counterpart to lanparty_quake3_lan_cvars: the handful of settings whose stock values
+# assume an internet connection and cost something real on a switch. Set to [] to leave the
+# engine's own defaults alone.
+lanparty_xonotic_lan_cvars:
+  # Bytes per second the client will accept from the server. The stock value is sized for a
+  # domestic uplink; a LAN has no such ceiling and the server's sv_maxrate is the real
+  # limit anyway.
+  - seta rate "1000000"
+  # Client-to-server input packets per second. More packets means the server sees your
+  # movement sooner, and on a switch the extra packets cost nothing worth having.
+  - seta cl_netfps "125"
+  # Send button presses the moment they happen rather than waiting for the next scheduled
+  # packet. Shaves a fraction of a packet interval off every shot.
+  - seta cl_netimmediatebuttons "1"
+  # Repeat recent input in each packet so a DROPPED one does not lose a keystroke. That is
+  # insurance against packet loss, and a wired LAN has none -- so this is pure redundant
+  # payload here. Raise it back to 1 if the party ends up on WiFi.
+  - seta cl_netrepeatinput "0"

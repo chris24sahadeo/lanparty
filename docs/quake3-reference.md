@@ -138,12 +138,33 @@ instead of the full pipe. Another reason gameplay stays on the physical LAN.
 | `rate` | 25000 | 25000 | Moot on a real LAN: `sv_lanForceRate 1` overrides it for same-subnet clients. |
 | `cl_timenudge` | 0 | 0 | Trades a deliberate delay for smoothness. Nothing to smooth at sub-millisecond RTT. |
 | `cl_packetdup` | 1 | 0 | Duplicate packets for loss resilience; unnecessary at 0% loss. |
-| `com_maxfps` | 85 | **125** | Jump height and strafe acceleration are framerate-coupled. 125 is canonical. |
+| `com_maxfps` | 85 | **125** | Jump height and strafe acceleration are framerate-coupled. 125 is canonical: 1000/125 = 8 ms exactly, so the per-frame millisecond rounding lands the same way every frame. |
 | `r_swapInterval` | 0 | 0 | Vsync off: tearing, but up to a frame less input latency. |
 | `r_finish` | 0 | **0** | `1` blocks the CPU until the GPU finishes each frame. Sometimes suggested as a smoothness fix; it is a latency tax. |
 | `cl_renderer` | `opengl2` | `opengl1` | opengl2 compiles shaders on first map load -- a hitch exactly when everyone spawns. |
 | `r_textureMode` | `GL_LINEAR_MIPMAP_NEAREST` | `..._LINEAR` | Trilinear. Note the capital M in the cvar name. |
 | `r_mode` | -2 | -1 + custom | `-2` = desktop resolution, `-1` = use `r_customwidth`/`r_customheight`. |
+
+### Frame rate and movement, and how to stop the two being related
+
+Movement is integrated in whole milliseconds once per rendered frame, so at stock settings
+**frame rate changes how high you jump and how fast you strafe**. `com_maxfps 125` is the
+community answer because 8 ms divides evenly; it is still only a request, and a machine
+that dips to 90 in a firefight silently gets different physics from the one beside it.
+
+`pmove_fixed 1` (with `pmove_msec 8`) makes the server step movement at a fixed 125 Hz
+regardless of any client's frame rate. Same physics as a machine perfectly holding 125 fps,
+but guaranteed for everyone. Cost: input is quantised to the 8 ms step, so up to 8 ms of
+added delay -- which is why some VQ3 players refuse it, and why it is worth it on
+mismatched party hardware.
+
+| cvar | Default | Party | Note |
+| --- | --- | --- | --- |
+| `pmove_fixed` | 0 | **1** | Game-module (`qagame`) cvar, set in `server.cfg`. Serverinfo, so clients pick it up on connect -- nothing to set per machine. |
+| `pmove_msec` | 8 | 8 | Clamped to `[8, 33]`. 8 is the floor and the only value matching 125 fps physics. |
+
+Neither is registered by `ioq3ded` itself -- they come from `qagamex86_64.so`, which is why
+they belong in `server.cfg` and not on the engine command line.
 | `r_subdivisions` | 4 | 1 | Curve tessellation. The default visibly facets arches and pipes. |
 
 ### Detecting the native resolution without a display
@@ -163,7 +184,8 @@ provisioned.
 ## Server notes
 
 - `sv_fps` default 20 is a dial-up-era value. 40 for LAN; it is also the ceiling on
-  clients' `snaps`.
+  clients' `snaps`. Note it is the SNAPSHOT rate, not the movement rate -- `pmove_msec`
+  sets the latter, and the two are deliberately different numbers.
 - `sv_pure 1` rejects clients whose `.pk3` set differs. Safe here only because Ansible
   pushes byte-identical data everywhere.
 - Map rotation is a `vstr` chain. `map` must come **last** in each `set` string because it

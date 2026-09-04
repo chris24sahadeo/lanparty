@@ -84,6 +84,16 @@
       set sv_lanForceRate 1
       set sv_floodProtect 0
 
+      // ---- movement physics ----
+      // pmove_fixed steps movement at a fixed rate instead of once per client frame, so
+      // jump height and strafe acceleration stop depending on whether a given laptop is
+      // holding 125 fps. pmove_msec 8 is 125 Hz, i.e. exactly the physics of a machine
+      // that never drops a frame. See group_vars for the 8 ms input-quantisation cost.
+      // These are serverinfo, so every client picks them up on connect -- there is nothing
+      // to configure per machine.
+      set pmove_fixed {{ lanparty_quake3_pmove_fixed }}
+      set pmove_msec {{ lanparty_quake3_pmove_msec }}
+
       // ---- gameplay ----
       set g_gametype {{ lanparty_quake3_gametype }}
       fraglimit {{ lanparty_quake3_fraglimit }}
