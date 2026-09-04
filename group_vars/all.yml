@@ -94,6 +94,23 @@ lanparty_quake3_maxclients: 16
 # 0 free-for-all, 1 tournament, 3 team deathmatch, 4 capture the flag.
 lanparty_quake3_gametype: 0
 lanparty_quake3_fraglimit: 30
+
+# Bots used to fill empty slots up to 4, hardcoded in the role. ZERO by default now: bots
+# make an empty server worth joining, and they are in the way the moment real people are
+# playing each other -- they take frags, take spawns, and turn a 1v1 into a crowd. A LAN
+# party is people who came to play each other.
+#
+# Raise it to fill a thin room. The engine adds bots up to this count and removes them
+# again as humans join, so 4 does mean "at least four players", not "four bots".
+#
+# bot_enable stays 1 in server.cfg regardless, so `/rcon bot_minplayers 4` still works live
+# without a re-provision -- setting this to 0 does not take the option away, it just stops
+# it being the default.
+#
+# Bot SKILL is not exposed. Quake III sets it with g_spSkill and the auto-added bots ignore
+# it in most builds; if you want a specific difficulty, add named bots with
+# `/rcon addbot <name> <skill>` instead.
+lanparty_quake3_bot_minplayers: 0
 lanparty_quake3_timelimit: 15
 # Server tick rate. The client's `snaps` should match it -- see lanparty_quake3_lan_cvars.
 # 40 is the LAN standard; the stock default of 20 exists for 1999 internet links.

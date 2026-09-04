@@ -99,9 +99,11 @@
       fraglimit {{ lanparty_quake3_fraglimit }}
       timelimit {{ lanparty_quake3_timelimit }}
       set g_allowvote 1
+      // bot_enable stays 1 even when no bots are wanted: it is what makes `/rcon addbot`
+      // and `/rcon bot_minplayers N` work live, without a re-provision.
       set bot_enable 1
-      // Bots fill empty slots so the server is worth joining before everyone arrives.
-      set bot_minplayers 4
+      // 0 by default -- see lanparty_quake3_bot_minplayers in group_vars for why.
+      set bot_minplayers {{ lanparty_quake3_bot_minplayers }}
 
       // ---- map rotation ----
       // A vstr chain: each entry sets the NEXT entry as nextmap, then loads its own map.
