@@ -137,9 +137,17 @@ lanparty_quake3_maps:
   - q3dm7
   - q3dm17
   - q3tourney2
-# Remote console password. Override on the command line for a real party:
-#   ./bootstrap.sh -e lanparty_quake3_rcon_password=something
-# Never commit a real one -- this repo is public.
+# Remote console password. A PLACEHOLDER -- never commit a real one, this repo is public.
+#
+# Put the real one in secrets/rcon.yml, encrypted, and bootstrap.sh loads it automatically
+# with -e (the highest-precedence source, so it beats this line without editing a tracked
+# file). secrets/ and vault-password are both gitignored. To create or change it:
+#
+#   .venv/bin/ansible-vault edit secrets/rcon.yml --vault-password-file vault-password
+#
+# Passing it as `./bootstrap.sh -e lanparty_quake3_rcon_password=...` also works and is
+# worse: the password lands in shell history and in the process list, where `ps` shows it
+# to every other user on the machine for the length of the run.
 lanparty_quake3_rcon_password: "changeme"
 
 # Short command name symlinked to the launcher, so `q` starts the game and joins the
@@ -414,9 +422,9 @@ lanparty_xonotic_maplist_shuffle: 0
 lanparty_xonotic_minplayers: 4
 lanparty_xonotic_bot_skill: 5
 
-# Remote console password. Override on the command line for a real party:
-#   ./bootstrap.sh -e lanparty_xonotic_rcon_password=something
-# Never commit a real one -- this repo is public. Empty disables rcon entirely.
+# Remote console password. A PLACEHOLDER -- never commit a real one, this repo is public.
+# Empty disables rcon entirely. The real one lives in secrets/rcon.yml, encrypted; see the
+# note on lanparty_quake3_rcon_password above for why that beats passing it with -e.
 lanparty_xonotic_rcon_password: "changeme"
 
 # System account the dedicated server runs as, and its userdir. The engine writes configs,

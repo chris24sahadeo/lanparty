@@ -149,5 +149,26 @@ elif compgen -G "$REPO_DIR/host_vars/*.yml" >/dev/null 2>&1 \
   Recreate it, or delete the host_vars entries and use --ask-become-pass instead."
 fi
 
+# --- secrets ----------------------------------------------------------------------------
+# secrets/*.yml override the placeholder passwords in group_vars/all.yml -- rcon today,
+# whatever a future game needs after that. Loaded with -e, which is the HIGHEST precedence
+# source, so a real password beats the shipped "changeme" without editing a tracked file.
+#
+# -e IS THE RIGHT SCOPE HERE and the wrong one for sudo. An rcon password belongs to the
+# SERVER, so one value for the whole run is correct; a sudo password belongs to a machine,
+# which is why those live in host_vars/ instead. See ./add-machine.sh --sudo-pass.
+#
+# WHY NOT ON THE COMMAND LINE. `./bootstrap.sh -e lanparty_quake3_rcon_password=hunter2`
+# works, and puts the password in shell history and in the process list, where `ps` shows
+# it to every other user on the machine for the length of the run. A file does neither.
+SECRET_ARGS=()
+if compgen -G "$REPO_DIR/secrets/*.yml" >/dev/null 2>&1; then
+  for secret in "$REPO_DIR"/secrets/*.yml; do
+    SECRET_ARGS+=(-e "@$secret")
+  done
+  log "Loading $(( ${#SECRET_ARGS[@]} / 2 )) file(s) from secrets/"
+fi
+
 log "Running site.yml"
-exec "$VENV/bin/ansible-playbook" site.yml "${BECOME_ARGS[@]}" "${VAULT_ARGS[@]}" "$@"
+exec "$VENV/bin/ansible-playbook" site.yml \
+  "${BECOME_ARGS[@]}" "${VAULT_ARGS[@]}" "${SECRET_ARGS[@]}" "$@"
