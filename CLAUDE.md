@@ -39,11 +39,22 @@ Do not add anything here that layer 1 or layer 2 already installs: Tailscale,
 associations, `.desktop` defaults, `~/.claude`, chezmoi-managed dotfiles. Two owners means
 two copies resolved only by PATH order, or two roles reporting `changed` forever.
 
-Add no apt source and no PPA. Everything needed is in stock Ubuntu universe.
+Add no apt source and no PPA. No flatpak remote either -- adding one is the same kind of
+system-wide change to a machine's software sources, and this rule is about the change, not
+about apt.
 
-This repo owns: `/usr/lib/quake3/base/baseq3/`, `/var/games/quake3-server/`,
-`/etc/systemd/system/lanparty-*.service`, `/usr/local/bin/lanparty-*`, `~/.q3a/`, and one
-marker-scoped block in `/etc/hosts`.
+Everything Quake III needs is in stock Ubuntu universe. **Xonotic is the documented
+exception**, and it is an exception to the packaging, not to the rule above: there is no
+`xonotic` in main, universe or multiverse (`darkplaces` is the bare Quake engine and cannot
+play it), so `roles/xonotic_common` unpacks upstream's own release archive into `/opt` after
+checking it against the SHA-512 upstream publishes. Apt is still used, for the seven shared
+libraries the binaries dlopen. If a third game needs the same treatment, it needs the same
+two things: a pinned checksum, and a sentence here saying why the package does not exist.
+
+This repo owns: `/usr/lib/quake3/base/baseq3/`, `/var/games/quake3-server/`, `/opt/Xonotic/`,
+`/var/games/xonotic-server/`, `/etc/systemd/system/lanparty-*.service`,
+`/usr/local/bin/lanparty-*`, `~/.q3a/`, `~/.xonotic/`, and one marker-scoped block in
+`/etc/hosts`.
 
 ## Firewall
 
@@ -118,8 +129,17 @@ plus a part-by-part note on what of it applies to Linux. `docs/quake3-reference.
 engine reference -- paths, AppArmor rules, which cvars are command-line-only, how the LAN
 browser works and why an overlay network breaks it, client tuning defaults and clamps.
 
-Check `docs/quake3-reference.md` before changing a cvar or a path. Most of what looks
-arbitrary in the roles is load-bearing and the reason is written down there.
+`docs/xonotic-reference.md` is the same thing for the other engine, and it is not a copy:
+DarkPlaces and idTech3 look alike and agree on almost nothing. Every number in it was read
+off `cvarlist`, `ss -lunp` or the configs inside the game's own `.pk3` files, and the
+paragraph saying so is there because several of them contradict what the shipped example
+configs imply.
+
+**Check the matching reference before changing a cvar or a path.** Most of what looks
+arbitrary in the roles is load-bearing and the reason is written down there. Two specific
+traps that have already been paid for: in Xonotic `rate` and `maxplayers` are COMMANDS with
+no cvar behind them, so `seta rate ...` silently creates a junk cvar; and `net_address`
+binds IPv4 only, leaving a wildcard IPv6 socket unless `net_address_ipv6` is set too.
 
 ## The config file chain
 

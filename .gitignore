@@ -14,6 +14,13 @@ baseq3/
 baseq3.zip
 .gamedata/
 
+# Xonotic's data IS freely licensed, so this pair of rules is about SIZE, not law: the
+# release archive is 1.18 GB and GitHub rejects anything over 100 MB. roles/xonotic_common
+# downloads it into .gamedata/ (already blocked above); these two catch a copy left
+# somewhere else in the tree.
+xonotic-*.zip
+Xonotic/
+
 # Anything with a password in it.
 secrets/
 *.vault

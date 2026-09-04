@@ -7,118 +7,174 @@ physical LAN address to install things, and the game server binds that same addr
 clients to connect to. Input packets ride the office switch. There is no overlay network,
 no VPN, and no second address that could be used by mistake.
 
-Game-agnostic: Quake III Arena is the first game, not the only one.
+Game-agnostic. Two games ship today -- **Quake III Arena** (the default) and **Xonotic** --
+and switching between them is one variable:
+
+```bash
+./bootstrap.sh                            # Quake III Arena
+./bootstrap.sh -e lanparty_game=xonotic   # Xonotic
+```
+
+Nothing in `site.yml` names either of them. See [Adding a game](#adding-a-game).
 
 ---
 
 ## Quick start
 
-### 1. Set up the machine you will run Ansible from
+### Before you start
 
-Copy and paste the whole block. It ends with a working game server on this machine.
+- Every machine on **one switch, one subnet**. No router or VLAN between them.
+- Ubuntu on each, with `openssh-server` installed on the ones you are not sitting at.
+- A copy of Quake III's game data on the **first machine only** -- a Steam or GOG install,
+  a retail disc, or `~/Downloads/baseq3.zip`. Ansible copies it to everyone else.
+  No copy anywhere? That is one extra command: see [No game data](#no-game-data).
+
+### Step 1 -- the first machine
+
+This is the machine you run Ansible from, and it is also the game server.
+
+Paste this exactly as it is. It fills in your own hostname and login, so there is
+**nothing to edit**:
 
 ```bash
 git clone git@github.com:chris24sahadeo/lanparty.git ~/lanparty
 cd ~/lanparty
 
-# Put THIS machine in the inventory as both the server and a player.
-# Replace my-pc with `hostname`, and chris with your login.
-cat > inventory/hosts.yml <<'YAML'
+cat > inventory/hosts.yml <<YAML
 all:
   vars:
-    ansible_user: chris
+    ansible_user: $USER
     ansible_host: "{{ lan_ip | default(inventory_hostname) }}"
   children:
     game_server:
       hosts:
-        my-pc:
+        $(hostname):
           ansible_connection: local
     game_clients:
       hosts:
-        my-pc:
+        $(hostname):
           ansible_connection: local
 YAML
 
-./bootstrap.sh --tags preflight   # checks the network, changes nothing, needs no sudo
-./bootstrap.sh                    # installs everything; asks for your sudo password once
-q                                 # play
+./bootstrap.sh --tags preflight
+./bootstrap.sh
 ```
 
-That is the whole thing. You do **not** find, download, or point anything at the game
-data -- see [step 4](#4-if-it-stops-and-asks-for-rclone) for the one case that needs a
-command from you.
+What those two commands do:
 
-### 2. Add another PC
+| | |
+| --- | --- |
+| `./bootstrap.sh --tags preflight` | checks the network only. Changes nothing, needs no sudo. |
+| `./bootstrap.sh` | installs everything. Asks for your sudo password once. |
 
-On the new machine:
+Now type **`q`**. You are playing.
+
+### Step 2 -- every other PC
+
+Do this once per machine. On the **new PC**:
 
 ```bash
 sudo apt install -y openssh-server
-ip -4 -br addr                    # note its 192.168.x.x address
+ip -4 -br addr
 ```
 
-Back on the first machine:
+Note its address on the office network -- the `192.168.x.x` one, not `127.0.0.1` and not
+anything on `docker0`.
+
+Back on the **first machine**, run this and answer three questions:
 
 ```bash
 cd ~/lanparty
-ssh-copy-id chris@192.168.0.51    # its address, and its login
+./add-machine.sh
 ```
 
-Add it to `inventory/hosts.yml` under `game_clients:`, indented exactly like the existing
-host. One address, that is the whole entry:
+```
+==> Adding a machine to lanparty
+Name for this machine (any label): joes-laptop
+LAN address for joes-laptop (its 192.168.x.x): 192.168.0.51
+SSH login on joes-laptop [chris]:
+==> Checking joes-laptop at 192.168.0.51
+  ok responds to ping
+  ok ssh key login works
+  ok inventory parses, and joes-laptop is in game_clients with lan_ip 192.168.0.51
+Run the network check now? (changes nothing, no sudo) [Y/n]
+Provision joes-laptop now? (asks for a sudo password) [Y/n]
+```
+
+It edits `inventory/hosts.yml` for you, and it will not let you add a machine that is
+unreachable, already listed, or has an address that cannot work. If SSH key login is not
+set up yet it offers to run `ssh-copy-id` there and then.
+
+Say yes to the last question and you are done -- type **`q`** on the new PC.
+
+<details>
+<summary>Doing it by hand instead</summary>
+
+`add-machine.sh` only writes two lines. Add them under `game_clients:` yourself, lined up
+with the host already there:
 
 ```yaml
         someones-laptop:
           lan_ip: 192.168.0.51
 ```
 
-Then:
+Add `ansible_user: someone` under it if that machine has a different login. Then:
 
 ```bash
-./bootstrap.sh --tags preflight
-./bootstrap.sh --ask-become-pass  # one password, used on every machine
+ssh-copy-id someone@192.168.0.51
+./bootstrap.sh --ask-become-pass
 ```
 
-Repeat for each PC. Everyone must be on **one flat layer-2 segment** -- same switch, same
-subnet, no VLAN between them -- or the in-game server browser finds nothing.
+`--ask-become-pass` is needed here and not in step 1: it asks once and uses the same
+password on every remote machine. If a machine has a different password, give that one
+passwordless sudo instead.
 
-### 3. Play
+</details>
 
-On any provisioned machine:
+### Playing
+
+```
+q                 join the server
+q --menu          main menu -- this is where you change settings
+q --windowed      join, but windowed
+q --help          everything else
+```
+
+---
+
+## If something goes wrong
+
+| What you see | What it means |
+| --- | --- |
+| `changed=0` | Nothing needed doing. That is what a correct second run looks like. |
+| `PREFLIGHT WARNINGS ... is wireless` | Plug that machine into the switch. WiFi jitter is the worst thing you can do to this. |
+| `sudo: a password is required` | Re-run with `--ask-become-pass`. |
+| `No interface on this machine holds its lan_ip` | The `lan_ip` in `inventory/hosts.yml` is wrong. Check `ip -4 -br addr` on that machine. `./add-machine.sh` refuses to write a bad one in the first place. |
+| `No Quake III game data found` | See [No game data](#no-game-data) below. |
+
+### No game data
+
+Only happens on a machine with no copy anywhere. `pak0.pk3` is retail data this repo
+cannot ship, so it is fetched from Google Drive instead -- once, then it is cached in
+`.gamedata/` and later runs are offline:
 
 ```bash
-q                 # join the server
-q --menu          # main menu, for changing settings
-q --help          # everything else
+sudo apt install -y rclone     # or: brew install rclone
+rclone config                  # add a Google Drive remote named personal-gdrive
+./bootstrap.sh
 ```
 
-### 4. If it stops and asks for rclone
-
-Only happens on a machine that has no copy of the game data anywhere. `pak0.pk3` is retail
-data this repo cannot ship, so it is fetched from Google Drive instead:
-
-```bash
-brew install rclone && rclone config   # or: sudo apt install rclone && rclone config
-                                       # add a Google Drive remote named personal-gdrive
-./bootstrap.sh                         # re-run; it downloads once into .gamedata/
-```
-
-Already own the game? Nothing to do -- a Steam, GOG, mounted-disc or
-`~/Downloads/baseq3.zip` copy is found automatically and wins over the download. See
+Already own the game? Nothing to do. A Steam, GOG, mounted-disc or `~/Downloads/baseq3.zip`
+copy is found automatically and used in preference to the download. Full search order:
 [Game data](#game-data).
 
-### Everything else
+### Running fewer machines
 
-`bootstrap.sh` builds an in-tree virtualenv on first run and passes every argument through
-to `ansible-playbook`, so `--check`, `--diff`, `--limit` and `--tags` all work.
-Useful tags: `preflight`, `host`, `server`, `client`.
+`bootstrap.sh` passes every argument through to `ansible-playbook`, so `--check`, `--diff`,
+`--limit` and `--tags` all work. Tags: `preflight`, `host`, `server`, `client`.
 
-| If | Then |
-| --- | --- |
-| a run reports `changed=0` | nothing needed doing; that is the expected second run |
-| preflight warns "interface is wireless" | plug into the switch; WiFi jitter is the worst thing you can do to this |
-| you narrow with `--limit` | include the server host too -- see [Adding a machine](#adding-a-machine) |
-| `sudo: a password is required` mid-run | re-run with `--ask-become-pass` |
+Using `--limit`, **include the server machine too** -- `--limit new-pc,my-pc`. The client
+tasks read the server's address, and that is only available for machines in the run.
 
 ---
 
@@ -353,10 +409,21 @@ game.
 
 1. Write `games/<id>.yml`. Copy `games/quake3.yml`; the keys are documented there.
 2. Write the roles it names -- typically `<id>_common`, `<id>_server`, `<id>_client`.
-3. Set `lanparty_game: <id>` in `group_vars/all.yml`.
+3. Set `lanparty_game: <id>` in `group_vars/all.yml`, or pass `-e lanparty_game=<id>` for
+   one run.
 
 Firewall handling, `/etc/hosts`, service naming and the LAN path check are generic and
 come for free.
+
+The two that exist:
+
+| | `lanparty_game` | port | game data |
+| --- | --- | --- | --- |
+| Quake III Arena | `quake3` | 27960/udp | retail, must be supplied -- see [Game data](#game-data) |
+| Xonotic | `xonotic` | 26000/udp | free, downloaded and checksummed automatically |
+
+Their ports do not collide, so both can be provisioned on one fleet and both servers can
+run at once. Only `lanparty_game` decides which one a given run touches.
 
 ---
 
@@ -389,6 +456,46 @@ Isolation is enforced, not promised. `ansible.cfg` redirects `collections_path`,
 `local_tmp` and `roles_path` in-tree; `bootstrap.sh` exports `ANSIBLE_CONFIG` and builds
 its own virtualenv rather than touching the shared `~/.local/bin/ansible*` shims.
 `test/container.sh` proves `~/.ansible` is unchanged after a full run.
+
+---
+
+## Notes on Xonotic specifically
+
+Full engine reference: [`docs/xonotic-reference.md`](docs/xonotic-reference.md). The short
+version, and how it differs from the other game:
+
+- **No game data problem at all.** Xonotic is free software with freely licensed art, so
+  `roles/xonotic_common` downloads the official 1.18 GB release from `dl.xonotic.org` and
+  verifies it against the SHA-512 upstream publishes. No search, no rclone, nothing to
+  carry into the room. It is still gitignored -- for size, not licensing.
+- **Not from apt.** There is no `xonotic` package in Ubuntu 24.04 in any component;
+  `darkplaces` in universe is the bare Quake engine and cannot play it. Flathub has a build,
+  but adding a flatpak remote is a system-wide change to a machine's software sources, which
+  is the same rule this repo obeys for apt. So: upstream's archive, unpacked to
+  `/opt/Xonotic`. Seven apt packages are still installed -- the shared libraries the
+  binaries dlopen, where a missing one is a silently degraded game rather than an error.
+- **`sv_public 0`, never `-1`.** 0 stops the server advertising to the public master
+  servers but still answers direct queries -- which is what a LAN server browser sends. `-1`
+  would hide it from the people sitting next to it. The dedicated build defaults to 1.
+- **`net_address` only binds IPv4.** Set it alone and the engine still opens a second socket
+  on `[::]` -- every IPv6 address on every interface, including a VPN's. The unit also passes
+  `net_address_ipv6 ::1`; there is no way to turn the socket off, so it is pointed at
+  loopback. Checked with `ss -lunp`, not assumed.
+- **Weapon telemetry ships switched on.** Upstream's example `server.cfg` leaves
+  `sv_weaponstats_file` pointed at xonotic.org, which posts server name, IP, map and
+  per-weapon damage tallies after every match. This repo writes its own config from scratch
+  rather than starting from that file, and blanks the cvar explicitly.
+- **`rate` is a command, not a cvar.** `seta rate 1000000` silently creates a new cvar and
+  changes nothing; the real setting lives in `_cl_rate` and is written by the bare `rate`
+  command.
+- **`sys_ticrate` is an interval, so smaller is faster.** Xonotic ships 30 Hz with its own
+  comment saying 60 "would be ideal, but kills home routers". A LAN has no router in the
+  path, so we take 60.
+- The client config is installed as **`autoexec.cfg`**, and here that is not a workaround:
+  the shipped data pk3 contains an `autoexec.cfg` that says, in full, *"placeholder file, is
+  replaced by autoexec.cfg in user home directory"*. `config.cfg` is rewritten by the engine
+  on every quit, exactly like Quake III's `q3config.cfg`.
+- Launch with `x` (or `lanparty-xonotic`). `x --help` explains where settings live.
 
 ---
 

@@ -334,11 +334,21 @@ lanparty_xonotic_exclude:
   - "Xonotic/*.exe"
   # The macOS dedicated server binary.
   - "Xonotic/xonotic-osx-dedicated"
+  # Windows DLLs for those .exe files -- libcurl, libpng, libvorbis and friends, twice
+  # over for 32- and 64-bit. 10 MB, and nothing on a Linux box can load them.
+  - "Xonotic/bin32/*"
+  - "Xonotic/bin64/*"
   # Mapping and packaging tools, plus an rsync auto-updater we specifically do not want
   # reaching out to the internet from a party machine.
   - "Xonotic/misc/*"
-  # Source build machinery. There is no compiler on a party laptop and no reason for one.
+  # Build machinery. There is no compiler on a party laptop and no reason for one.
   - "Xonotic/Makefile"
+  #
+  # Xonotic/source/ IS NOT EXCLUDED, deliberately, though it is 28 MB and nothing here
+  # reads it. The binaries this role copies onto other people's machines are GPL, and
+  # source/ holds the corresponding source for them -- the DarkPlaces engine, the QuakeC
+  # game code, gmqcc and d0_blind_id. Shipping the binary and dropping the source is
+  # exactly the shape the licence exists to prevent, and 28 MB is not a reason to.
 
 # ---------------------------------------------------------------------------------------
 # XONOTIC -- dedicated server
@@ -397,8 +407,10 @@ lanparty_xonotic_maps:
 lanparty_xonotic_maplist_shuffle: 0
 
 # Bots to fill empty slots so the server is worth joining before everyone arrives, and the
-# skill they play at. Xonotic's scale runs 0-10; 8 is a genuinely hard bot and 4-5 is about
-# a competent human.
+# skill they play at. `skill` defaults to 8 and lower is easier; 5 is a setting a mixed room
+# can enjoy rather than be farmed by. Do not trust the engine's own description of this
+# cvar -- it is inherited Quake text about monster difficulty and says nothing about
+# Xonotic's bots.
 lanparty_xonotic_minplayers: 4
 lanparty_xonotic_bot_skill: 5
 
@@ -439,20 +451,20 @@ lanparty_xonotic_height: "1080"
 # Set to "" to leave whatever the player already had.
 lanparty_xonotic_effects_preset: high
 
+# NOTE ON THE FIRST TWO. Both are already the engine's own defaults -- checked against
+# `cvarlist`, not assumed -- and they are listed anyway because autoexec.cfg is re-read on
+# every launch and config.cfg is not. A player who flips vsync on in the menu writes it to
+# config.cfg; this puts it back next time the game starts. That is the whole point of the
+# file, and a setting left out of it silently becomes per-machine.
 lanparty_xonotic_gfx_cvars:
   # VSYNC OFF, for the same reason as Quake III: it costs up to a whole frame of input
   # latency to avoid tearing, and a deathmatch would rather have the frame.
   - seta vid_vsync "0"
   # Frame cap. Xonotic's physics are NOT frame-rate coupled the way Quake III's are, so
-  # unlike com_maxfps 125 this is taste rather than muscle memory. 250 is also what Xonotic
-  # itself ships; it is restated here so that changing it is a one-line edit in this file
-  # rather than an argument with a config inside a .pk3.
+  # unlike com_maxfps 125 this is taste rather than muscle memory.
   - seta cl_maxfps "250"
-  # Frame rate while the window is not focused. Stops an alt-tabbed game heating the laptop
-  # everyone else is waiting on.
-  - seta cl_maxidlefps "60"
-  # Frame counter, top right. At a party this is how an argument about whose machine is
-  # struggling gets settled in two seconds.
+  # Frame counter, top right. Default 0. At a party this is how an argument about whose
+  # machine is struggling gets settled in two seconds.
   - seta showfps "1"
 
 # ---------------------------------------------------------------------------------------
@@ -462,10 +474,15 @@ lanparty_xonotic_gfx_cvars:
 # assume an internet connection and cost something real on a switch. Set to [] to leave the
 # engine's own defaults alone.
 lanparty_xonotic_lan_cvars:
-  # Bytes per second the client will accept from the server. The stock value is sized for a
-  # domestic uplink; a LAN has no such ceiling and the server's sv_maxrate is the real
-  # limit anyway.
-  - seta rate "1000000"
+  # Bytes per second the client will accept from the server. The stock 40000 is sized for a
+  # domestic uplink; the server's sv_maxrate already allows 1000000, so this is the client
+  # half of a ceiling that a switch will never reach anyway.
+  #
+  # NO `seta`, AND THAT IS NOT A TYPO. `rate` is a COMMAND in this engine, not a cvar --
+  # it writes the real setting into _cl_rate, which cvarlist describes as "internal storage
+  # cvar for current rate (changed by rate command)". `seta rate 1000000` would silently
+  # create a brand new cvar named rate, save it to config.cfg forever, and change nothing.
+  - rate 1000000
   # Client-to-server input packets per second. Xonotic ships 60 with the note "should match
   # or be a multiple of sys_ticrate" -- which, with the 60 Hz tick set above, 60 already
   # does. 120 is the next legal step up and halves the age of the newest input the server
@@ -473,10 +490,13 @@ lanparty_xonotic_lan_cvars:
   # multiple of the tick makes the gap between a packet arriving and the frame that reads
   # it wander, which is worse than a slightly larger constant gap.
   - seta cl_netfps "120"
-  # Send button presses the moment they happen rather than waiting for the next scheduled
-  # packet. Shaves a fraction of a packet interval off every shot.
-  - seta cl_netimmediatebuttons "1"
-  # Repeat recent input in each packet so a DROPPED one does not lose a keystroke. That is
-  # insurance against packet loss, and a wired LAN has none -- so this is pure redundant
-  # payload here. Raise it back to 1 if the party ends up on WiFi.
+  # Repeat recent unacknowledged input in each packet, so a DROPPED packet does not lose a
+  # keystroke. The default is 1. That is insurance against packet loss, and a wired switch
+  # has none -- so on this network it is redundant payload and a small amount of extra work
+  # per packet at both ends. Put it back to 1 if the party ends up on WiFi, where the
+  # insurance is worth more than the bytes.
   - seta cl_netrepeatinput "0"
+  #
+  # cl_netimmediatebuttons is NOT here on purpose: it already defaults to 1, and unlike the
+  # graphics settings above nothing in the menus can turn it off, so restating it would be
+  # noise rather than a guard.

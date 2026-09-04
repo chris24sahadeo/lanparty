@@ -1,0 +1,235 @@
+---
+# THE DEDICATED SERVER.
+#
+# Bound to the physical LAN address, with every path to the public internet closed. Those
+# two facts are the point of this role; everything else is gameplay taste.
+#
+# HOW XONOTIC STARTS A SERVER, because it is not obvious and it dictates the shape below.
+# The engine reads quake.rc from the game data, which execs default.cfg (the whole shipped
+# ruleset), then config.cfg, then autoexec.cfg, then `stuffcmds` -- the point at which
+# `+something` arguments from the command line run -- and finally, because this binary is
+# the dedicated build, it runs the alias `startmap_dm`. Xonotic redefines that alias as:
+#
+#     set _sv_init 0; map _init/_init; exec $serverconfig; set _sv_init 1
+#
+# So OUR config is exec'd by name, from the cvar `serverconfig`, at map-init time. That is
+# why the unit passes `+serverconfig server.cfg` -- exactly as upstream's own
+# server/server_linux.sh does -- and why anything that must be set BEFORE the first map
+# loads has to be a `+` argument instead. See the unit for which settings those are.
+
+- name: Xonotic server -- create the service account
+  ansible.builtin.user:
+    name: "{{ lanparty_xonotic_server_user }}"
+    system: true
+    home: "{{ lanparty_xonotic_server_home }}"
+    create_home: true
+    shell: /usr/sbin/nologin
+    state: present
+  become: true
+
+- name: Xonotic server -- create the config directory inside the engine search path
+  ansible.builtin.file:
+    # NOT an arbitrary location, and NOT the home directory itself. The engine's `exec`
+    # resolves against its own virtual filesystem, whose writable root is
+    # <userdir>/<gamedir> -- and Xonotic's gamedir is literally called `data`. That is the
+    # same reason a normal player's config lives at ~/.xonotic/data and not ~/.xonotic.
+    # A file at /etc/anything is unreachable by +exec no matter how it is spelled.
+    path: "{{ lanparty_xonotic_server_home }}/data"
+    state: directory
+    owner: "{{ lanparty_xonotic_server_user }}"
+    group: "{{ lanparty_xonotic_server_user }}"
+    mode: "0755"
+  become: true
+
+- name: Xonotic server -- write server.cfg
+  ansible.builtin.copy:
+    dest: "{{ lanparty_xonotic_server_home }}/data/server.cfg"
+    owner: "{{ lanparty_xonotic_server_user }}"
+    group: "{{ lanparty_xonotic_server_user }}"
+    mode: "0640"
+    content: |
+      // Managed by Ansible: {{ lanparty_repo_name | default('lanparty') }}/roles/xonotic_server.
+      // Edits here are overwritten on the next run. Change group_vars/all.yml instead.
+      //
+      // Deliberately NOT a copy of the shipped server/server.cfg. That file is an example
+      // written for a public internet server: nearly all of it is commented out, and the
+      // two lines that are not are sv_vote_gametype and an upload URL for weapon
+      // telemetry. Starting from it would mean inheriting both by accident.
+
+      // ---- identity ----
+      hostname        "{{ lanparty_xonotic_hostname }}"
+      // Slots INCLUDING spectators, which is where this differs from Quake III's
+      // sv_maxclients.
+      maxplayers      {{ lanparty_xonotic_maxplayers }}
+      // Empty disables rcon entirely, which is the safe default this repo ships.
+      rcon_password   "{{ lanparty_xonotic_rcon_password }}"
+
+      // ---- NO INTERNET. This block is the whole reason the repo exists. ----
+      // sv_public: 1 advertises to the public master servers, 0 answers direct queries
+      // only, -1 answers nothing. 0 is the right one and -1 is a trap: a LAN server
+      // browser finds servers by broadcasting a query, so -1 would hide this server from
+      // the very people sitting next to it. The engine default is 1.
+      sv_public 0
+
+      // The master list is blanked as well, belt and braces, in case someone runs the
+      // binary by hand without the systemd unit. The engine also carries three built-in
+      // masters in sv_masterextra1..3 (dpmaster.deathmask.net and friends); with
+      // sv_public 0 none of the six is ever contacted.
+      set sv_master1 ""
+      set sv_master2 ""
+      set sv_master3 ""
+      set sv_master4 ""
+
+      // WEAPON TELEMETRY, OFF. Xonotic's own example server.cfg leaves this line
+      // UNCOMMENTED and pointed at xonotic.org, which posts per-match weapon balance data
+      // -- server name, IP, gametype, map, per-weapon hit and damage tallies -- upstream
+      // after every match. It is a reasonable thing for a public server to opt into and a
+      // pointless outbound connection for a party in one room. "" is the engine default.
+      set sv_weaponstats_file ""
+
+      // Fallback HTTP source for map content a joining client is missing. Everything in
+      // the rotation is already on every machine (Ansible put it there), and there is no
+      // route out anyway -- so this only buys a stall while curl waits for DNS.
+      set sv_curl_defaulturl ""
+
+      // ---- tick and bandwidth: LAN values, not home-router values ----
+      // sys_ticrate is an INTERVAL in seconds, so smaller is faster. See group_vars for
+      // why 60 Hz rather than the shipped 30.
+      sys_ticrate {{ lanparty_xonotic_sys_ticrate }}
+      // Per-client bandwidth ceiling in bytes/second. 1000000 is ALREADY the engine
+      // default -- stated here because it is the number the client's `rate` is clamped
+      // against, and a reader comparing the two configs should not have to go and look it
+      // up to find out which side wins.
+      sv_maxrate 1000000
+      // Server-side hit scan against where each player actually was when they fired,
+      // rather than where the server thinks they are now. 2 is the engine default and is
+      // named here because it is the setting that decides whether a shot that looked like
+      // a hit counts as one.
+      set g_antilag 2
+
+      // ---- who is connected, and over which address ----
+      // 0 SHOWS client IP addresses in `status`. The default is 1, which hides them for
+      // privacy on a public server. At a LAN party the addresses are the diagnostic: they
+      // are how you notice that someone joined over a VPN interface or a second NIC
+      // instead of the party segment, which is the exact failure this repo exists to
+      // prevent. Everyone in the room can already see everyone else.
+      seta sv_status_privacy 0
+
+      // ---- gameplay ----
+      // A command, not a cvar -- `gametype dm` and not `set gametype dm`.
+      gametype {{ lanparty_xonotic_gametype }}
+      // _override replaces the per-map limit for every map. -1 hands the decision back to
+      // the map, 0 means no limit.
+      set fraglimit_override {{ lanparty_xonotic_fraglimit }}
+      set timelimit_override {{ lanparty_xonotic_timelimit }}
+      // Bots fill empty slots so the server is worth joining before everyone arrives.
+      set minplayers {{ lanparty_xonotic_minplayers }}
+      skill {{ lanparty_xonotic_bot_skill }}
+
+      // ---- map rotation ----
+      // One space-separated list, unlike Quake III's vstr chain -- Xonotic has a real
+      // rotation built in. Empty would mean "every map you have", which is 26 of them.
+      set g_maplist "{{ lanparty_xonotic_maps | join(' ') }}"
+      // The engine default is 1, random. 0 plays the list in order, so a room can be told
+      // what is coming next.
+      set g_maplist_shuffle {{ lanparty_xonotic_maplist_shuffle }}
+  become: true
+  notify: Restart the Xonotic dedicated server
+
+- name: Xonotic server -- install the systemd unit
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ game_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible: lanparty/roles/xonotic_server. Edits are overwritten.
+      [Unit]
+      Description={{ game_display_name }} dedicated server (LAN only)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User={{ lanparty_xonotic_server_user }}
+      Group={{ lanparty_xonotic_server_user }}
+      WorkingDirectory={{ lanparty_xonotic_prefix }}
+      # WHY THESE FOUR ARE ON THE COMMAND LINE AND NOT IN server.cfg.
+      #
+      # -basedir and -userdir are engine startup options; there is no cvar for either.
+      # basedir is where the game data lives, userdir is the one tree the engine writes to
+      # -- configs, logs, downloaded content -- and it is the only path ReadWritePaths below
+      # grants. Passing both explicitly means the daemon never depends on its working
+      # directory or on $HOME being anything in particular.
+      #
+      # net_address and port must be set BEFORE the first map loads, and server.cfg is
+      # exec'd by `startmap_dm` AFTER `map _init/_init` -- so a listen socket would already
+      # be open on 0.0.0.0 by the time the config was read. `+` arguments run at the
+      # `stuffcmds` line in quake.rc, which is earlier, and is the same mechanism upstream
+      # uses for +serverconfig.
+      #
+      # net_address IS THE LATENCY GUARANTEE. Binding one address rather than 0.0.0.0 means
+      # the daemon listens on the LAN interface and nothing else -- not on tailscale0 or any
+      # other VPN interface the machine happens to be running -- so no client can reach it
+      # over an overlay even by accident.
+      #
+      # AND net_address ONLY COVERS IPv4. This was checked with `ss -lunp` against a running
+      # server rather than assumed: with net_address set and net_address_ipv6 left alone,
+      # the engine still opens a SECOND socket on [::]:26000 -- every IPv6 address on every
+      # interface, which is the whole hole the first option just closed. cvarlist confirms
+      # why: both cvars default to "", described as "if empty, use default interfaces".
+      #
+      # ::1 rather than blank or an address: there is no option to switch IPv6 off, so the
+      # socket is going to exist; pointing it at loopback means nothing outside this machine
+      # can reach it. Fleets that really want IPv6 gameplay want a different repo -- the
+      # whole design here is one address per machine.
+      ExecStart={{ lanparty_xonotic_prefix }}/xonotic-linux64-dedicated \
+          -basedir {{ lanparty_xonotic_prefix }} \
+          -userdir {{ lanparty_xonotic_server_home }} \
+          +net_address {{ lanparty_lan_ip }} \
+          +net_address_ipv6 ::1 \
+          +port {{ lanparty_xonotic_port }} \
+          +serverconfig server.cfg
+      Restart=on-failure
+      RestartSec=5
+      StandardOutput=journal
+      StandardError=journal
+
+      # Hardening. Nothing exotic -- this is a C engine listening on a UDP socket.
+      NoNewPrivileges=true
+      PrivateTmp=true
+      PrivateDevices=true
+      ProtectHome=true
+      ProtectSystem=strict
+      ProtectKernelTunables=true
+      ProtectControlGroups=true
+      ReadWritePaths={{ lanparty_xonotic_server_home }}
+      CapabilityBoundingSet=
+      RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+      # LEFT OFF, and not because it was tried and failed. DarkPlaces runs the game's
+      # QuakeC in an interpreter rather than compiling it, so in principle nothing here
+      # needs a page that is writable and executable at once -- but "in principle" is not
+      # the same as verified, and the place to find out is not thirty seconds after a party
+      # starts. The Quake III unit next door leaves it off for the same reason.
+      MemoryDenyWriteExecute=false
+
+      [Install]
+      WantedBy=multi-user.target
+  become: true
+  notify:
+    - Reload systemd
+    - Restart the Xonotic dedicated server
+
+- name: Xonotic server -- enable and start
+  ansible.builtin.systemd_service:
+    name: "{{ game_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+
+- name: Xonotic server -- report where it is listening
+  ansible.builtin.debug:
+    msg: >-
+      {{ game_display_name }} is serving on {{ lanparty_lan_ip }}:{{ lanparty_xonotic_port }}
+      (physical LAN), and on no other interface.

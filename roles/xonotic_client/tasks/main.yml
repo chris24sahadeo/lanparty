@@ -1,0 +1,336 @@
+---
+# THE PLAYER CLIENT: config plus a launcher that connects to the right address.
+
+- name: Xonotic client -- resolve the dedicated server address
+  ansible.builtin.set_fact:
+    lanparty_xonotic_connect: >-
+      {{ hostvars[groups['game_server'][0]]['lan_ip']
+         | default(hostvars[groups['game_server'][0]]['ansible_facts']['default_ipv4']['address']) }}
+
+# ---------------------------------------------------------------------------------------
+# RESOLUTION: ONE MODE EVERYWHERE, CLAMPED DOWN WHERE THE PANEL CANNOT SHOW IT.
+#
+# Identical policy to roles/quake3_client, and see group_vars for why one mode beats each
+# machine's native one at a party. Detection runs for a single job: a panel NARROWER than
+# the requested mode cannot display it, and asking a 1366x768 laptop for 1080p fullscreen
+# gets a black screen rather than a smaller picture.
+#
+# /sys/class/drm is read instead of xrandr because it needs no X display, no package, and
+# works over a plain SSH connection with nobody logged in -- which is how every machine
+# except this one gets provisioned.
+# ---------------------------------------------------------------------------------------
+- name: Xonotic client -- detect a connected display's preferred mode
+  ansible.builtin.shell: |
+    set -o pipefail
+    for c in /sys/class/drm/card*-*/; do
+      [ "$(cat "$c/status" 2>/dev/null)" = "connected" ] || continue
+      # First line of `modes` is the preferred mode, which for a laptop panel is native.
+      head -1 "$c/modes" 2>/dev/null && exit 0
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  register: lanparty_xonotic_native_mode
+  changed_when: false
+  failed_when: false
+
+- name: Xonotic client -- split the detected mode into width and height
+  ansible.builtin.set_fact:
+    # Both empty when nothing was detected -- a headless machine, or a laptop with the lid
+    # shut. Not an error; it just means there is nothing to clamp against.
+    lanparty_xonotic_native_w: >-
+      {{ (lanparty_xonotic_native_mode.stdout | default('') | trim).split('x')[0]
+         if 'x' in (lanparty_xonotic_native_mode.stdout | default('') | trim) else '' }}
+    lanparty_xonotic_native_h: >-
+      {{ (lanparty_xonotic_native_mode.stdout | default('') | trim).split('x')[1]
+         if 'x' in (lanparty_xonotic_native_mode.stdout | default('') | trim) else '' }}
+
+- name: Xonotic client -- decide whether the panel can show the requested mode
+  ansible.builtin.set_fact:
+    # Width alone is the test. Every mode in play is wider than it is tall, so a panel
+    # narrower than the request cannot be showing a taller one either.
+    lanparty_xonotic_clamp: >-
+      {{ lanparty_xonotic_native_w | length > 0
+         and lanparty_xonotic_width | length > 0
+         and (lanparty_xonotic_native_w | int) < (lanparty_xonotic_width | int) }}
+
+- name: Xonotic client -- settle on a resolution
+  ansible.builtin.set_fact:
+    # Detected wins in two cases: nothing was requested, or what was requested does not fit.
+    lanparty_xonotic_gfx_w: >-
+      {{ lanparty_xonotic_native_w
+         if (lanparty_xonotic_clamp | bool or lanparty_xonotic_width | length == 0)
+         else lanparty_xonotic_width }}
+    lanparty_xonotic_gfx_h: >-
+      {{ lanparty_xonotic_native_h
+         if (lanparty_xonotic_clamp | bool or lanparty_xonotic_height | length == 0)
+         else lanparty_xonotic_height }}
+
+- name: Xonotic client -- report the resolution in use
+  ansible.builtin.debug:
+    msg: >-
+      {{ ('Rendering at ' ~ lanparty_xonotic_gfx_w ~ 'x' ~ lanparty_xonotic_gfx_h
+          ~ (' -- clamped down from ' ~ lanparty_xonotic_width ~ 'x' ~ lanparty_xonotic_height
+             ~ ', which this display cannot show.'
+             if lanparty_xonotic_clamp | bool
+             else (' (this display reports ' ~ lanparty_xonotic_native_w ~ 'x'
+                   ~ lanparty_xonotic_native_h ~ ').'
+                   if lanparty_xonotic_native_w | length > 0 else '.')))
+         if lanparty_xonotic_gfx_w | length > 0
+         else 'No display mode detected; falling back to vid_desktopfullscreen 1, the desktop resolution.' }}
+
+- name: Xonotic client -- create the per-user game directory
+  ansible.builtin.file:
+    # ~/.xonotic is the engine's userdir and `data` is its gamedir, so ~/.xonotic/data is
+    # the writable root of the engine's virtual filesystem. Not an XDG (X Desktop Group)
+    # path, and not configurable without the -userdir startup option.
+    path: "{{ ansible_facts['user_dir'] }}/.xonotic/data"
+    state: directory
+    mode: "0755"
+
+# ---------------------------------------------------------------------------------------
+# THE CONFIG, AND WHY IT IS NOT CALLED config.cfg.
+#
+# Same trap as Quake III's q3config.cfg, same answer. The engine REWRITES config.cfg from
+# its live cvar state on every clean exit, so a tuned config under that name survives
+# exactly until the first player quits.
+#
+# autoexec.cfg is the right file, and here that is not merely a workaround -- it is what
+# upstream intends. The shipped data pk3 contains an autoexec.cfg whose entire contents
+# are:
+#
+#     // placeholder file, is replaced by autoexec.cfg in user home directory
+#
+# quake.rc execs default.cfg, then config.cfg, then autoexec.cfg, so a real file at
+# ~/.xonotic/data/autoexec.cfg shadows that placeholder and wins over both.
+# ---------------------------------------------------------------------------------------
+- name: Xonotic client -- write autoexec.cfg
+  ansible.builtin.copy:
+    dest: "{{ ansible_facts['user_dir'] }}/.xonotic/data/autoexec.cfg"
+    mode: "0644"
+    content: |
+      // Managed by Ansible: lanparty/roles/xonotic_client. Edits are overwritten.
+
+      // Part 1: the effects preset.
+      //
+      // FIRST, deliberately. Each effects-*.cfg is a block of about eighty r_* and cl_*
+      // settings shipped inside the game data, and it OVERWRITES whatever it covers. Run
+      // it after our own graphics settings and it would quietly undo them.
+      // The engine's own default is effects-normal.cfg.
+      {% if lanparty_xonotic_effects_preset | length > 0 %}
+      exec effects-{{ lanparty_xonotic_effects_preset }}.cfg
+      {% endif %}
+
+      // Part 2: resolution.
+      //
+      // vid_desktopfullscreen 1 -- the shipped default -- means "use the desktop
+      // resolution and ignore vid_width/vid_height entirely". It has to be turned OFF for
+      // a specific mode to mean anything, which is the single least obvious thing about
+      // configuring this engine's video. When nothing was detected we leave it on, which
+      // is the equivalent of Quake III's r_mode -2.
+      {% if lanparty_xonotic_gfx_w | length > 0 %}
+      seta vid_desktopfullscreen "0"
+      seta vid_width "{{ lanparty_xonotic_gfx_w }}"
+      seta vid_height "{{ lanparty_xonotic_gfx_h }}"
+      // Square pixels. The engine multiplies by this to work out aspect ratio, and a
+      // stale value from a 4:3 era config stretches everything.
+      seta vid_pixelheight "1"
+      {% else %}
+      seta vid_desktopfullscreen "1"
+      {% endif %}
+      seta vid_fullscreen "1"
+
+      // Part 3: graphics.
+      {% for cvar in lanparty_xonotic_gfx_cvars %}
+      {{ cvar }}
+      {% endfor %}
+
+      // Part 4: LAN networking. These come after the preset for the same reason as
+      // above, and they are the settings whose stock values assume an internet link.
+      {% for cvar in lanparty_xonotic_lan_cvars %}
+      {{ cvar }}
+      {% endfor %}
+
+      // Part 5: the player's own overrides, LAST so they win over everything here.
+      // Ansible creates that file once and never rewrites it -- see the role. It is the
+      // only file in the chain a person is meant to edit by hand.
+      exec lanparty-local.cfg
+
+# ---------------------------------------------------------------------------------------
+# LAUNCHER.
+#
+# Upstream ships xonotic-linux-sdl.sh, and this deliberately does not use it. That script
+# exists to cd into the install directory and to support starting the game on a separate X
+# server -- a feature nobody here wants -- and to do it, it calls `netstat`, which Ubuntu
+# 24.04 does not install by default (net-tools is not a dependency of anything on a stock
+# desktop). Running the binary with an explicit -basedir does the one useful half and has
+# no such dependency.
+#
+# It also hard-codes the server's LAN address, so nobody has to type an address or pick the
+# wrong one out of a browser list.
+# ---------------------------------------------------------------------------------------
+- name: Xonotic client -- install the launcher
+  ansible.builtin.copy:
+    dest: /usr/local/bin/lanparty-xonotic
+    owner: root
+    group: root
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      # Managed by Ansible: lanparty/roles/xonotic_client. Edits are overwritten.
+      #
+      # Joins the dedicated server over the PHYSICAL LAN. The address below comes from the
+      # server's lan_ip and must stay a plain LAN address -- swapping in one handed out by
+      # a VPN or overlay is exactly the mistake this setup exists to prevent.
+      set -eu
+
+      SERVER="{{ lanparty_xonotic_connect }}:{{ lanparty_xonotic_port }}"
+      ENGINE="{{ lanparty_xonotic_prefix }}/xonotic-linux64-sdl"
+      BASE="-basedir {{ lanparty_xonotic_prefix }}"
+
+      usage() {
+        cat <<'USAGE'
+      Xonotic, LAN party build.
+
+        x                 join the server immediately
+        x -m, --menu      start at the main menu instead, for changing settings
+        x -w, --windowed  join, but windowed -- handy with a config open beside it
+        x -s HOST[:PORT]  join a different server
+        x -h, --help      this text
+
+      Anything else is passed straight to the engine, so console commands work:
+
+        x +vid_width 1280 +vid_height 720
+        x --menu +cl_maxfps 125
+
+      WHERE SETTINGS LIVE, and which of them survive what:
+
+        1. autoexec.cfg      generated by Ansible, OVERWRITTEN on every run.
+                             Do not edit -- change group_vars/all.yml and re-run.
+        2. lanparty-local.cfg  yours. Created once, never touched again by Ansible,
+                             and exec'd last so it beats everything above.
+                             ~/.xonotic/data/lanparty-local.cfg
+        3. config.cfg        written by the ENGINE when you quit. Anything you change
+                             in the menus lands here -- and is then overridden on the
+                             next launch by 1 and 2. Menu changes do not stick. That
+                             is deliberate, not a bug.
+
+      So: to try something, use the console (~) -- it applies now and is forgotten.
+      To keep it for yourself, put it in lanparty-local.cfg.
+      To keep it for everyone, put it in group_vars/all.yml and re-run Ansible.
+      USAGE
+      }
+
+      CONNECT="+connect $SERVER"
+      EXTRA=""
+
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          -h|--help)     usage; exit 0 ;;
+          # No +connect at all, so the game stops at the main menu. This is the one you
+          # want for poking at Settings, or for playing bots offline.
+          -m|--menu)     CONNECT=""; shift ;;
+          -w|--windowed) EXTRA="$EXTRA +vid_fullscreen 0"; shift ;;
+          -s|--server)
+            [ $# -ge 2 ] || { echo "x: --server needs an address" >&2; exit 2; }
+            case "$2" in *:*) CONNECT="+connect $2" ;;
+                         *)   CONNECT="+connect $2:{{ lanparty_xonotic_port }}" ;; esac
+            shift 2 ;;
+          *) break ;;
+        esac
+      done
+
+      # Unquoted on purpose: these hold multiple engine arguments, not one path.
+      # shellcheck disable=SC2086
+      exec "$ENGINE" $BASE $CONNECT $EXTRA "$@"
+  become: true
+
+- name: Xonotic client -- is the short alias name already taken
+  ansible.builtin.stat:
+    path: "/usr/local/bin/{{ lanparty_xonotic_alias }}"
+  register: lanparty_xonotic_alias_path
+  when: lanparty_xonotic_alias | length > 0
+
+- name: Xonotic client -- refuse to clobber an unrelated command
+  ansible.builtin.assert:
+    # A one-letter name is cheap to type and cheap to collide with. If something else
+    # already owns it, say so rather than silently replacing a tool the machine's owner
+    # installed on purpose.
+    that:
+      - not lanparty_xonotic_alias_path.stat.exists
+        or lanparty_xonotic_alias_path.stat.islnk | default(false)
+    fail_msg: >-
+      /usr/local/bin/{{ lanparty_xonotic_alias }} already exists and is not a symlink, so
+      something else owns that name. Pick a different lanparty_xonotic_alias, or set it to
+      "" to skip the shortcut.
+    quiet: true
+  when: lanparty_xonotic_alias | length > 0
+
+- name: Xonotic client -- link the short alias to the launcher
+  ansible.builtin.file:
+    src: /usr/local/bin/lanparty-xonotic
+    dest: "/usr/local/bin/{{ lanparty_xonotic_alias }}"
+    state: link
+  become: true
+  when: lanparty_xonotic_alias | length > 0
+
+# ---------------------------------------------------------------------------------------
+# A PLACE FOR PERSONAL SETTINGS THAT SURVIVES BOTH THINGS THAT ERASE THEM.
+#
+# autoexec.cfg is regenerated by Ansible on every run, and config.cfg is rewritten by the
+# engine on every quit. Between the two there is nowhere for a player to put a setting and
+# expect to find it later.
+#
+# force: false is what makes this work: Ansible creates the file once and then never
+# touches it again, no matter how many times the playbook runs.
+# ---------------------------------------------------------------------------------------
+- name: Xonotic client -- create the personal override file, once
+  ansible.builtin.copy:
+    dest: "{{ ansible_facts['user_dir'] }}/.xonotic/data/lanparty-local.cfg"
+    mode: "0644"
+    force: false
+    content: |
+      // YOUR settings. Ansible created this file once and will never overwrite it.
+      //
+      // autoexec.cfg execs this last, so anything here beats both the shipped defaults and
+      // whatever the menus wrote into config.cfg. Uncomment and edit freely.
+      //
+      // seta sensitivity "6"      // 3 is the default
+      // seta fov "110"            // 100 default, 1-170 allowed
+      // seta cl_maxfps "125"
+      // seta vid_vsync "1"       // vsync ON, if you would rather not have tearing
+      // seta crosshair "3"
+      // seta cl_autoswitch "0"   // do not switch weapon on pickup
+      // exec effects-ultra.cfg   // a heavier preset than the one Ansible set
+      //
+      // Reload without restarting the game:  /exec lanparty-local.cfg
+
+- name: Xonotic client -- ensure the user applications directory exists
+  ansible.builtin.file:
+    path: "{{ ansible_facts['user_dir'] }}/.local/share/applications"
+    state: directory
+    mode: "0755"
+
+- name: Xonotic client -- install a desktop entry
+  ansible.builtin.copy:
+    dest: "{{ ansible_facts['user_dir'] }}/.local/share/applications/lanparty-xonotic.desktop"
+    mode: "0644"
+    # No MimeType line on purpose. Claiming a default handler is how two config-management
+    # repos on one machine end up fighting over the same association forever, and this
+    # workstation already runs two others.
+    content: |
+      [Desktop Entry]
+      Type=Application
+      Name={{ game_display_name }} (LAN party)
+      Comment=Connect to {{ lanparty_xonotic_connect }}:{{ lanparty_xonotic_port }}
+      Exec=/usr/local/bin/lanparty-xonotic
+      Terminal=false
+      Categories=Game;ActionGame;
+      Keywords=xonotic;fps;lan;
+
+- name: Xonotic client -- report how to play
+  ansible.builtin.debug:
+    msg: >-
+      Run `{{ lanparty_xonotic_alias | default('lanparty-xonotic', true) }}` to join
+      {{ lanparty_xonotic_connect }}:{{ lanparty_xonotic_port }}, or launch
+      "{{ game_display_name }} (LAN party)" from the applications menu.
