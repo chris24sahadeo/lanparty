@@ -1,8 +1,24 @@
 #!/usr/bin/env bash
 # Locate Quake III game data on the control node, so nobody has to type a path.
 #
-# Prints one line to stdout:   <kind>\t<path>      kind is "zip" or "dir"
-# Prints nothing if it finds nothing. Never fails.
+# Prints TWO LINES to stdout:
+#     line 1   kind -- "zip" or "dir"
+#     line 2   path
+# Prints NOTHING if it finds nothing, which is the signal the role uses to decide whether
+# to fall back to the rclone remote -- do not make this print a placeholder instead.
+# Never fails.
+#
+# TWO LINES AND NOT ONE DELIMITED LINE. This used to emit <kind>\t<path>, and the tab did
+# not survive the trip: in the folded scalar (`>-`) that consumes it, '\t' reaches Jinja as
+# a literal backslash-t rather than a tab, so .split() returned the whole line as a single
+# field and the path came out EMPTY. The failure then surfaced as "No Quake III game data
+# found" on a machine with the file sitting in ~/Downloads all along.
+#
+# JSON would also fix that, and was tried -- but it needs the path escaped, and hand-rolled
+# escaping in shell is its own bug ("${s//\\/\\\\}" does not double a backslash, which is easy
+# to write and hard to see). Two lines need no escaping at all: Ansible already splits
+# stdout into stdout_lines, so there is no separator anywhere to get wrong. A path may
+# contain a space, a quote or a backslash and still arrive intact.
 #
 # WHY THIS IS A SCRIPT AND NOT AN INLINE shell: TASK. Ansible runs split_args() across a
 # free-form shell blob looking for chdir=/creates=, and that parse breaks on an unbalanced
@@ -29,7 +45,7 @@ fi
 [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ] && USER="$SUDO_USER"
 : "${USER:=$(id -un)}"
 
-emit() { printf '%s\t%s\n' "$1" "$2"; exit 0; }
+emit() { printf '%s\n%s\n' "$1" "$2"; exit 0; }
 
 # Shape 1: a zip holding baseq3/*.pk3, which is how the setup guide ships it.
 for z in \

@@ -183,15 +183,25 @@
 
 - name: Quake3 -- settle on where the game data is coming from
   ansible.builtin.set_fact:
+    # The script prints kind on the first line and the path on the second, and Ansible
+    # splits stdout into stdout_lines for free -- so there is no separator to lose in
+    # translation. It used to print <kind>\t<path> and split on '\t' here, which SILENTLY
+    # produced an empty path: this is a folded scalar, where '\t' reaches Jinja as a literal
+    # backslash-t rather than a tab. The symptom was "No Quake III game data found" on a
+    # machine with the archive sitting in ~/Downloads.
+    #
+    # Both facts require TWO lines before they trust either, so a half-written result
+    # reports "found nothing" rather than a kind with no path.
+    #
     # "zip" means unarchive it; "dir" means copy the pk3 files out of it.
     lanparty_data_kind: >-
       {{ 'zip' if lanparty_quake3_baseq3_src | length > 0
-         else ((lanparty_data_search.stdout | default('') | trim).split('\t')[0]
-               if (lanparty_data_search.stdout | default('') | trim) | length > 0 else '') }}
+         else ((lanparty_data_search.stdout_lines | default([]))[0]
+               if (lanparty_data_search.stdout_lines | default([])) | length >= 2 else '') }}
     lanparty_data_path: >-
       {{ lanparty_quake3_baseq3_src if lanparty_quake3_baseq3_src | length > 0
-         else ((lanparty_data_search.stdout | default('') | trim).split('\t')[1]
-               if '\t' in (lanparty_data_search.stdout | default('') | trim) else '') }}
+         else ((lanparty_data_search.stdout_lines | default([]))[1]
+               if (lanparty_data_search.stdout_lines | default([])) | length >= 2 else '') }}
   run_once: true
 
 - name: Quake3 -- say what was found, or explain what is missing
