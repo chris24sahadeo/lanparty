@@ -51,8 +51,16 @@
     #   192.168.100.41 dev wlp170s0 src 192.168.100.236 uid 1000
     # or, for the server talking to itself,
     #   local 192.168.100.236 dev lo src 192.168.100.236 uid 1000
-    lanparty_route_dev: "{{ lanparty_route.stdout | regex_search('dev\\s+(\\S+)', '\\1') | first | default('') }}"
-    lanparty_route_src: "{{ lanparty_route.stdout | regex_search('src\\s+(\\S+)', '\\1') | first | default('') }}"
+    #
+    # regex_findall AND NOT regex_search. On no match regex_search returns None, and
+    # `None | first` raises "'NoneType' object is not iterable" -- which `| default('')`
+    # cannot catch, because default() rescues an undefined value and not an exception from
+    # the filter before it. The no-match case here is the task failing above, i.e. no route
+    # to the server at all: precisely the condition this role exists to REPORT, so it must
+    # not be the condition that kills the play. regex_findall returns [] and `first` then
+    # yields undefined, which default() does catch.
+    lanparty_route_dev: "{{ lanparty_route.stdout | regex_findall('dev\\s+(\\S+)') | first | default('') }}"
+    lanparty_route_src: "{{ lanparty_route.stdout | regex_findall('src\\s+(\\S+)') | first | default('') }}"
 
 - name: Preflight -- find the interface that actually owns this machine lan_ip
   ansible.builtin.set_fact:
@@ -105,11 +113,23 @@
 - name: Preflight -- extract the worst round trip seen
   ansible.builtin.set_fact:
     # Summary line: rtt min/avg/max/mdev = 0.312/0.498/1.204/0.201 ms
-    # regex_search with a capture group returns None when it does not match, and None is
-    # not subscriptable -- hence the default([], true), which also catches an empty list.
+    #
+    # SINGLE BACKSLASHES, AND THAT IS NOT A TYPO. This is a folded scalar (`>-`), where
+    # YAML treats a backslash as an ordinary character -- so `\\s` here would reach Jinja as
+    # two backslashes and the pattern would look for a literal one. The two set_facts above
+    # are DOUBLE-quoted scalars, where YAML collapses `\\` to `\`, so they are correct with
+    # two. Same regex, different quoting, different number of backslashes.
+    #
+    # Both mistakes were live at once here: the doubled `\\1` backref made regex_search
+    # raise inside its own argument parsing ("'NoneType' object has no attribute 'group'")
+    # on EVERY input, matching or not, and the doubled `[\\d.]` could not have matched a
+    # digit anyway. It went unnoticed because the task is skipped on the server, and until
+    # a second machine joined the party the server was the only host.
+    #
+    # regex_findall for the same reason as above: it returns [] rather than raising.
     lanparty_rtt_max: >-
-      {{ (lanparty_ping.stdout | regex_search('=\\s*[\\d.]+/[\\d.]+/([\\d.]+)/', '\\1')
-          | default([], true) | first | default(0)) | float }}
+      {{ (lanparty_ping.stdout | regex_findall('=\s*[\d.]+/[\d.]+/([\d.]+)/')
+          | first | default(0)) | float }}
   when:
     - inventory_hostname != lanparty_server_host
     - (lanparty_ping.rc | default(1)) == 0
