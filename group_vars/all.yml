@@ -363,11 +363,18 @@ lanparty_xonotic_gametype: dm
 lanparty_xonotic_fraglimit: 30
 lanparty_xonotic_timelimit: 15
 
-# Server frame interval in SECONDS, so smaller is faster -- the inverse of Quake III's
-# sv_fps, and an easy thing to get backwards. The shipped example is 0.0333333, which is
-# 30 frames a second. 0.0166667 is 60, which the shipped config itself names as the
-# "smoother gameplay, somewhat higher CPU" option. A LAN server is not CPU-starved and a
-# deathmatch is exactly where the extra frames show.
+# Server frame INTERVAL in seconds, so smaller is faster -- the inverse of Quake III's
+# sv_fps, and an easy thing to get backwards.
+#
+# Xonotic ships 0.0333333 (30 Hz), and its own xonotic-common.cfg says exactly why:
+#
+#     //sys_ticrate 0.0166667 // 60fps. This would be ideal, but kills home routers.
+#     sys_ticrate 0.0333333   // Use 30fps instead.
+#
+# "Kills home routers" is a constraint about pushing 60 packets a second per player through
+# consumer NAT (Network Address Translation) hardware over the internet. A LAN party has no
+# router in the path at all -- one switch, one segment -- so the reason for the compromise
+# is absent and we take the setting upstream calls ideal.
 lanparty_xonotic_sys_ticrate: "0.0166667"
 
 # Map rotation. Every name here is a real .bsp inside 0.8.6's maps pk3 -- CHECKED, because
@@ -437,8 +444,9 @@ lanparty_xonotic_gfx_cvars:
   # latency to avoid tearing, and a deathmatch would rather have the frame.
   - seta vid_vsync "0"
   # Frame cap. Xonotic's physics are NOT frame-rate coupled the way Quake III's are, so
-  # unlike com_maxfps 125 this number is taste rather than muscle memory. 250 keeps input
-  # sampling fast without letting an idle menu spin the GPU at its thermal limit.
+  # unlike com_maxfps 125 this is taste rather than muscle memory. 250 is also what Xonotic
+  # itself ships; it is restated here so that changing it is a one-line edit in this file
+  # rather than an argument with a config inside a .pk3.
   - seta cl_maxfps "250"
   # Frame rate while the window is not focused. Stops an alt-tabbed game heating the laptop
   # everyone else is waiting on.
@@ -458,9 +466,13 @@ lanparty_xonotic_lan_cvars:
   # domestic uplink; a LAN has no such ceiling and the server's sv_maxrate is the real
   # limit anyway.
   - seta rate "1000000"
-  # Client-to-server input packets per second. More packets means the server sees your
-  # movement sooner, and on a switch the extra packets cost nothing worth having.
-  - seta cl_netfps "125"
+  # Client-to-server input packets per second. Xonotic ships 60 with the note "should match
+  # or be a multiple of sys_ticrate" -- which, with the 60 Hz tick set above, 60 already
+  # does. 120 is the next legal step up and halves the age of the newest input the server
+  # has when it runs a frame. Do NOT put an arbitrary number here: one that is not a
+  # multiple of the tick makes the gap between a packet arriving and the frame that reads
+  # it wander, which is worse than a slightly larger constant gap.
+  - seta cl_netfps "120"
   # Send button presses the moment they happen rather than waiting for the next scheduled
   # packet. Shaves a fraction of a packet interval off every shot.
   - seta cl_netimmediatebuttons "1"

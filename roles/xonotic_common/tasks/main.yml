@@ -1,0 +1,251 @@
+---
+# ENGINE AND GAME DATA. Applied to the server and to every client, because Xonotic ships
+# both in one archive and both ends need the same maps.
+
+# ---------------------------------------------------------------------------------------
+# WHICH PACKAGES, AND WHY THE ENGINE IS NOT ONE OF THEM.
+#
+# There is no `xonotic` package in Ubuntu -- not in main, not in universe, not in
+# multiverse. `darkplaces` in universe is the bare Quake engine that Xonotic's engine was
+# forked from; it has none of Xonotic's game code or data and cannot play it. Flathub has a
+# build, but adding a flatpak remote is a system-wide change to a machine's software
+# sources, which is the same rule this repo obeys for apt: see "One owner per thing" in
+# CLAUDE.md. So the engine comes from upstream's own release archive, below.
+#
+# WHAT APT IS STILL FOR: the shared libraries that archive expects to find. Xonotic's
+# binaries dlopen most of these at runtime rather than linking them, so a missing one is
+# not a startup error -- it is a silently degraded game. Each entry says what it costs.
+#
+#   libsdl2-2.0-0    HARD requirement, the only one. xonotic-linux64-sdl will not start
+#                    without it. It also pulls in the X11, Wayland, ALSA (Advanced Linux
+#                    Sound Architecture) and PulseAudio libraries the binary needs.
+#   libpng16-16t64   PNG textures and the loading screen. Missing: untextured surfaces.
+#   libfreetype6     Font rendering. Missing: no readable text, including the menu.
+#   libvorbisfile3   Ogg Vorbis playback -- all of Xonotic's sound and music. Silent game.
+#   libtheora0       Ogg Theora video, used by the intro and by map cinematics.
+#   libcurl4t64      HTTP map downloads from a server the client is missing content for.
+#   unzip            Needed to unpack the release archive on the target.
+#
+# libjpeg is deliberately absent: 0.8.6's binaries have no libjpeg reference at all, so the
+# JPEG decoder is built in. Adding the package would be cargo cult.
+# ---------------------------------------------------------------------------------------
+- name: Xonotic -- install the runtime libraries the engine expects
+  ansible.builtin.apt:
+    name:
+      - libsdl2-2.0-0
+      - libpng16-16t64
+      - libfreetype6
+      - libvorbisfile3
+      - libtheora0
+      - libcurl4t64
+      - unzip
+    state: present
+    # Ensure-presence only. No version pin, no apt source added, no dist-upgrade.
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+- name: Xonotic -- settle on where the release archive lives
+  ansible.builtin.set_fact:
+    # .gamedata/ is the same gitignored directory the Quake III role uses for its download,
+    # so a control node has one place where large game payloads accumulate.
+    lanparty_xonotic_archive: >-
+      {{ lanparty_xonotic_src if lanparty_xonotic_src | length > 0
+         else playbook_dir ~ '/.gamedata/xonotic-' ~ lanparty_xonotic_version ~ '.zip' }}
+
+# ---------------------------------------------------------------------------------------
+# WHAT IS ALREADY INSTALLED, ASKED FIRST -- and asked by VERSION, not by existence.
+#
+# A stamp file holding the version string does two jobs an existence check cannot. A re-run
+# on an already-provisioned machine skips the 1.18 GB transfer entirely, and bumping
+# lanparty_xonotic_version makes exactly the machines that are behind unpack the new
+# archive. An `if the binary exists` test would pin every machine to whatever it first got.
+# ---------------------------------------------------------------------------------------
+- name: Xonotic -- read the installed version stamp
+  ansible.builtin.slurp:
+    src: "{{ lanparty_xonotic_prefix }}/.lanparty-version"
+  register: lanparty_xonotic_stamp
+  changed_when: false
+  # Absent on a machine that has never had Xonotic, which is information rather than
+  # failure -- hence failed_when rather than ignore_errors, which would also swallow a
+  # genuine permission problem further up.
+  failed_when: false
+
+- name: Xonotic -- decide whether this machine needs the archive
+  ansible.builtin.set_fact:
+    lanparty_xonotic_installed: >-
+      {{ (lanparty_xonotic_stamp.content | default('') | b64decode | trim)
+         == lanparty_xonotic_version }}
+
+- name: Xonotic -- does any machine in this play still need it
+  ansible.builtin.set_fact:
+    # ansible_play_hosts, not groups[...]: with --limit the play may be a subset, and a
+    # host nobody is touching must not keep the control-node download running for one that
+    # is -- nor suppress it.
+    lanparty_xonotic_any_needed: >-
+      {{ ansible_play_hosts
+         | map('extract', hostvars, ['lanparty_xonotic_installed'])
+         | select('equalto', false) | list | length > 0 }}
+  run_once: true
+
+- name: Xonotic -- note that every machine is already on this version
+  ansible.builtin.debug:
+    msg: >-
+      Xonotic {{ lanparty_xonotic_version }} is already unpacked at
+      {{ lanparty_xonotic_prefix }} on every machine in this play. Skipping the download and
+      the 1.18 GB push -- the archive does not need to still be on the control node for a
+      re-run to work.
+  run_once: true
+  when: not lanparty_xonotic_any_needed
+
+# ---------------------------------------------------------------------------------------
+# GETTING THE ARCHIVE, WHICH FOR THIS GAME IS ALLOWED TO BE A PLAIN DOWNLOAD.
+#
+# Everything the Quake III role does -- the search script, the rclone remote, the "put a
+# copy in one of these paths" error message -- exists because retail id Software data
+# cannot be redistributed and therefore cannot be fetched from anywhere public. None of
+# that applies here. Xonotic is free software with freely licensed art, upstream hosts the
+# release itself, and publishes a SHA-512 beside it. get_url is the right tool and there is
+# no Google Drive interstitial to work around.
+#
+# get_url with a checksum is also the whole idempotency story for this step: when
+# .gamedata/ already holds a file whose digest matches, it verifies and makes no request at
+# all. A truncated or tampered file fails the compare and is fetched again.
+# ---------------------------------------------------------------------------------------
+- name: Xonotic -- create the .gamedata directory on the control node
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/.gamedata"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  run_once: true
+  when:
+    - lanparty_xonotic_any_needed
+    - lanparty_xonotic_src | length == 0
+
+- name: Xonotic -- download and verify the release archive on the control node
+  ansible.builtin.get_url:
+    url: "{{ lanparty_xonotic_url }}"
+    dest: "{{ lanparty_xonotic_archive }}"
+    checksum: "sha512:{{ lanparty_xonotic_sha512 | trim }}"
+    mode: "0644"
+    # 1.18 GB. The default 10 s timeout is for the CONNECT, not the transfer, so this only
+    # needs to cover a slow handshake -- but a mirror that accepts the connection and then
+    # stalls should give up rather than hang the run.
+    timeout: 60
+  delegate_to: localhost
+  run_once: true
+  when:
+    - lanparty_xonotic_any_needed
+    - lanparty_xonotic_src | length == 0
+
+- name: Xonotic -- confirm the archive is really there
+  ansible.builtin.stat:
+    path: "{{ lanparty_xonotic_archive }}"
+  register: lanparty_xonotic_zip
+  delegate_to: localhost
+  run_once: true
+  changed_when: false
+  when: lanparty_xonotic_any_needed
+
+- name: Xonotic -- explain a missing archive rather than failing inside unarchive
+  ansible.builtin.assert:
+    that: lanparty_xonotic_zip.stat.exists
+    success_msg: "Release archive: {{ lanparty_xonotic_archive }}"
+    fail_msg: |-
+      {{ lanparty_xonotic_archive }} is not on the control node.
+
+      This path came from lanparty_xonotic_src, which is set, so the automatic download was
+      skipped. Either point it at a real xonotic-{{ lanparty_xonotic_version }}.zip, or set
+      it back to "" and let the role fetch the official release from
+      {{ lanparty_xonotic_url }}.
+    quiet: true
+  run_once: true
+  when: lanparty_xonotic_any_needed
+
+# ---------------------------------------------------------------------------------------
+# UNPACKING, WITHOUT COPYING 1.18 GB ONTO THE MACHINE IT IS ALREADY ON.
+#
+# `unarchive` normally stages its source through the TARGET's temporary directory, which
+# for the workstation that is both control node and player means writing a second copy of
+# the archive into ~/.ansible/tmp -- a gigabyte of pointless I/O, in the one directory this
+# repo goes out of its way not to touch (see the header of ansible.cfg).
+#
+# So: look for the archive on the target first, at the same path, and unpack it in place
+# when it is there and its digest matches. Remote machines take the transfer, which they
+# have to. The check is "does this machine already have the file", not "is this machine the
+# control node" -- so a target that was staged some other way benefits too.
+# ---------------------------------------------------------------------------------------
+- name: Xonotic -- is the archive already on this machine
+  ansible.builtin.stat:
+    path: "{{ lanparty_xonotic_archive }}"
+    checksum_algorithm: sha512
+    get_checksum: true
+  register: lanparty_xonotic_local_zip
+  changed_when: false
+  when: not lanparty_xonotic_installed
+
+- name: Xonotic -- decide whether to unpack in place or push the archive over
+  ansible.builtin.set_fact:
+    lanparty_xonotic_in_place: >-
+      {{ (lanparty_xonotic_local_zip.stat.exists | default(false))
+         and (lanparty_xonotic_local_zip.stat.checksum | default(''))
+             == (lanparty_xonotic_sha512 | trim) }}
+  when: not lanparty_xonotic_installed
+
+- name: Xonotic -- unpack the release
+  ansible.builtin.unarchive:
+    src: "{{ lanparty_xonotic_archive }}"
+    dest: /opt
+    # True skips the transfer and unzips the copy already sitting on the target; false
+    # pushes ours. Templated from the digest comparison above, so the file that gets
+    # unpacked is byte-identical either way.
+    remote_src: "{{ lanparty_xonotic_in_place }}"
+    # Cross-platform ballast -- macOS bundle, Windows binaries, build and mapping tools.
+    # See lanparty_xonotic_exclude in group_vars/all.yml for what each entry costs.
+    exclude: "{{ lanparty_xonotic_exclude }}"
+    owner: root
+    group: root
+    # CAPITAL X, NOT an octal mode. The archive carries the execute bit on the engine
+    # binaries and on every directory; `X` preserves it exactly there and nowhere else. A
+    # flat 0644 would strip execute from the binaries AND from the directories, at which
+    # point nothing can traverse into them and nothing can run.
+    mode: "u=rwX,g=rX,o=rX"
+  become: true
+  when: not lanparty_xonotic_installed
+
+# ---------------------------------------------------------------------------------------
+# THE STAMP. Written only after a successful unpack, so an interrupted transfer leaves the
+# machine looking un-provisioned -- which it is -- and the next run redoes it. Writing it
+# alongside the unarchive task, rather than as part of it, is what makes that ordering
+# explicit.
+# ---------------------------------------------------------------------------------------
+- name: Xonotic -- stamp the installed version
+  ansible.builtin.copy:
+    dest: "{{ lanparty_xonotic_prefix }}/.lanparty-version"
+    owner: root
+    group: root
+    mode: "0644"
+    content: "{{ lanparty_xonotic_version }}\n"
+  become: true
+
+- name: Xonotic -- confirm the engine and the game data are present
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: lanparty_xonotic_check
+  changed_when: false
+  loop:
+    - "{{ lanparty_xonotic_prefix }}/xonotic-linux64-dedicated"
+    - "{{ lanparty_xonotic_prefix }}/xonotic-linux64-sdl"
+    - "{{ lanparty_xonotic_prefix }}/data"
+  loop_control:
+    label: "{{ item | basename }}"
+
+- name: Xonotic -- report a half-unpacked install rather than leaving it to the game
+  ansible.builtin.assert:
+    that: lanparty_xonotic_check.results | map(attribute='stat.exists') | select('equalto', false) | list | length == 0
+    fail_msg: >-
+      {{ lanparty_xonotic_prefix }} is missing one of the engine binaries or the data
+      directory after unpacking. The archive is probably truncated -- delete
+      {{ lanparty_xonotic_archive }} and re-run, and get_url will fetch and verify it again.
+    quiet: true

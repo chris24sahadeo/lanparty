@@ -1,0 +1,30 @@
+---
+# GAME MANIFEST -- Xonotic. Same contract as games/quake3.yml; see that file for the
+# authoritative documentation of each key.
+game_id: xonotic
+game_display_name: "Xonotic"
+
+game_common_role: xonotic_common
+game_server_role: xonotic_server
+game_client_role: xonotic_client
+
+# 26000/udp is Xonotic's default server port -- inherited from Quake, because DarkPlaces
+# speaks a Quake-derived protocol. UDP only; there is no TCP listener.
+#
+# It does not collide with Quake III's 27960, so both games can be provisioned on the same
+# fleet and both servers can run at once. Only the value of lanparty_game decides which one
+# a run touches.
+game_udp_ports:
+  - "{{ lanparty_xonotic_port }}"
+game_tcp_ports: []
+
+game_service_name: lanparty-xonotic
+
+# FALSE, and this is the one line where Xonotic differs from Quake III in kind rather than
+# in detail. Quake III needs pak0.pk3, which is retail id Software data nobody may
+# redistribute, so a human has to supply a copy. Xonotic is free software end to end -- the
+# DarkPlaces engine is GPL-2, and the art, maps, sounds and music are GPL/CC-BY-SA -- so
+# roles/xonotic_common simply downloads the official release and verifies it against the
+# SHA-512 (Secure Hash Algorithm, 512-bit) that upstream publishes. Nothing to find, nothing
+# to carry into the room on a USB stick.
+game_data_required: false
