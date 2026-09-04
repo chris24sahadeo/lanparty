@@ -12,17 +12,24 @@ lanparty_game: quake3
 # ---------------------------------------------------------------------------------------
 # THE LAN PATH -- the reason this repo exists
 # ---------------------------------------------------------------------------------------
-# The address the game binds and connects on. Defaults to the host's primary IPv4 address,
-# which is correct for a machine with one NIC (Network Interface Card). Override per host
-# with `lan_ip:` in inventory/hosts.yml for anything multi-homed.
+# The address the game binds and connects on, and the same address Ansible deployed over:
+# inventory/hosts.yml templates `ansible_host` from `lan_ip`, so there is exactly one
+# address per machine and no way to use the wrong one.
 #
-# This must never resolve to a 100.64.0.0/10 tailnet address. roles/lan_preflight checks it.
+# Defaults to the host's primary IPv4 address, which is correct for a machine with one NIC
+# (Network Interface Card). Override per host with `lan_ip:` in inventory/hosts.yml for
+# anything multi-homed.
+#
+# It must be an address the machine actually holds on the party segment, and never an
+# address handed out by an overlay network such as Tailscale's 100.64.0.0/10 -- this repo
+# no longer uses one, but a machine may still be running the daemon for unrelated reasons.
+# roles/lan_preflight checks both.
 lanparty_lan_ip: "{{ lan_ip | default(ansible_facts['default_ipv4']['address']) }}"
 
 # Preflight is WARN-ONLY by default: it prints findings and continues, so a first run on a
 # half-assembled network still provisions everything. Flip to true on party morning and a
-# machine whose game traffic would cross the tailnet, or whose ping is over budget, fails
-# the run instead.
+# machine whose game traffic would leave over the wrong interface, or whose ping is over
+# budget, fails the run instead.
 lanparty_preflight_strict: false
 
 # Worst acceptable round trip to the server, milliseconds. A wired 1GbE switch gives well
@@ -44,6 +51,26 @@ lanparty_max_rtt_ms: 5
 #
 # Set it to an absolute path only to override the search.
 lanparty_quake3_baseq3_src: ""
+
+# THE FALLBACK, when the control node has no copy at all: an rclone remote holding
+# baseq3.zip. Only consulted after the local search above comes up empty, so a machine that
+# already has the data never touches the network.
+#
+# WHY RCLONE AND NOT A PLAIN URL. The archive lives in Google Drive, and Drive does not
+# serve a 637 MB file over plain HTTP: anything past roughly 100 MB gets an HTML virus-scan
+# interstitial instead of the bytes. `get_url` would happily write that HTML to
+# .gamedata/baseq3.zip and the failure would surface much later as an unzip error that says
+# nothing about what went wrong. rclone handles the interstitial, resumes a broken transfer,
+# and verifies the copy against Drive's own MD5 (Message Digest 5) checksum -- which is why
+# no separate checksum is pinned on this path.
+#
+# WHAT THIS REPO WILL NOT DO IS INSTALL RCLONE. It is a Homebrew package on this
+# workstation and Homebrew belongs to layer 2; see "One owner per thing" in CLAUDE.md. A
+# control node without it gets told how to set it up and the run stops there.
+#
+# The remote name is per-machine (it lives in ~/.config/rclone/rclone.conf, which this repo
+# also does not manage). Set to "" to disable the fallback entirely.
+lanparty_quake3_baseq3_rclone_src: "personal-gdrive:lanparty/baseq3.zip"
 
 # sha256 of the archive, when you want one enforced. Empty by default because with the
 # search enabled the file could legitimately be any of several valid copies, and a

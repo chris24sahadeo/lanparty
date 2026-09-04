@@ -1,7 +1,8 @@
 # Working in this repo
 
 Ansible for a LAN party. Read `README.md` first -- it covers what the repo does and why
-the game deliberately avoids the tailnet. This file is the rules for changing it.
+every machine is addressed by one physical LAN address, for deployment and gameplay alike.
+This file is the rules for changing it.
 
 ## The one thing that must not break
 
@@ -85,8 +86,15 @@ month -- about one clone.
 
 The goal behind the request -- nobody typing a path -- is met instead by
 `roles/quake3_common/files/find-game-data.sh`, which searches the places the data really
-lives and uses the first hit. If someone wants the data version-controlled, a PRIVATE
-repo or a release asset on one is the route; do not move it here.
+lives and uses the first hit.
+
+**The hosting question is answered too.** One private copy lives in Google Drive and
+`roles/quake3_common` fetches it with rclone into `.gamedata/baseq3.zip` when, and only
+when, the local search finds nothing -- see `lanparty_quake3_baseq3_rclone_src`. That
+makes a fresh control node clone-and-run without putting a byte of retail data in git.
+Do not replace that with `get_url`: Drive serves an HTML virus-scan interstitial rather
+than the file above roughly 100 MB, and rclone also resumes and checksums. Do not add a
+task that installs rclone either -- Homebrew belongs to layer 2.
 
 ## Shell logic goes in files/, not inline
 

@@ -37,9 +37,13 @@ docker run -d --name "$CONTAINER" ubuntu:24.04 sleep 3600 >/dev/null
 docker exec "$CONTAINER" bash -c \
   'apt-get update -qq && apt-get install -y -qq python3 iproute2 iputils-ping >/dev/null'
 
-# A container has no tailnet and no second machine, so it is both server and client to
-# itself -- which is exactly the Phase 1 shape and enough to exercise every role.
-INV="$(mktemp)"
+# A container has no second machine, so it is both server and client to itself -- which is
+# exactly the Phase 1 shape and enough to exercise every role.
+# --suffix=.yml IS REQUIRED, not tidiness. Ansible's YAML inventory plugin refuses any
+# file whose name does not end in .yml/.yaml/.json, so a bare mktemp name falls through to
+# the ini plugin, fails to parse, and the run continues against an EMPTY inventory --
+# every play "skipping: no hosts matched" and a recap with no changed= line at all.
+INV="$(mktemp --suffix=.yml)"
 cat > "$INV" <<EOF
 all:
   children:
@@ -62,6 +66,13 @@ log "Run 1"
 log "Run 2 -- must report changed=0"
 OUT="$("$VENV/bin/ansible-playbook" -i "$INV" site.yml)"
 echo "$OUT" | tail -5
+# Check that the host was reached BEFORE checking what it reported. An unparsed inventory
+# or an unreachable container produces a recap with no `changed=` line at all, and without
+# this guard that reads as "changed != 0" and gets reported as an idempotency failure --
+# which sends you looking in exactly the wrong place.
+echo "$OUT" | grep -qE "^$CONTAINER +: +ok=[1-9]" \
+  || die "The container was never provisioned -- no play matched it, or it was unreachable.
+  This is not an idempotency result. Check the inventory and the connection plugin above."
 echo "$OUT" | grep -qE "changed=0 " || die "Second run made changes; something is not idempotent."
 
 AFTER="$(fingerprint)"

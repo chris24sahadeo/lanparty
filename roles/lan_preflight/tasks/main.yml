@@ -1,16 +1,27 @@
 ---
 # PROVE THAT GAMEPLAY TRAFFIC STAYS ON THE LAN.
 #
-# This is the role the whole repo is built around. Every machine here is on a Tailscale
-# tailnet, and reaching the game server by its tailnet address would "work" -- which is
-# the problem. Tailscale is WireGuard: even when two peers find a direct path over the
-# same switch, packets are encrypted, decrypted, and squeezed through a smaller MTU
-# (Maximum Transmission Unit) on the way. That cost lands on exactly the packets a
-# deathmatch cannot afford it on. Quake III's LAN server browser, which broadcasts on the
-# local segment, does not cross an overlay network at all.
+# This is the role the whole repo is built around. Everything -- deployment and gameplay
+# alike -- runs over the physical LAN address in `lan_ip`, and this role checks, per
+# machine and before anything is installed, that the address really is what we think it is.
 #
-# So the game binds and connects on the PHYSICAL LAN address, and this role checks -- per
-# machine, before anything is installed -- that the address really is what we think it is.
+# WHY IT STILL MATTERS NOW THAT THERE IS NO OVERLAY. This repo used to deploy over a
+# Tailscale tailnet and play over the LAN. It does not any more, but three of the four
+# things that can silently move game traffic off the switch are still live on a typical
+# workstation:
+#
+#   1. A VPN or overlay daemon the machine runs for unrelated reasons -- Tailscale,
+#      WireGuard, corporate VPN. It can own the route to an address you assumed was local,
+#      and then every packet is encrypted, decrypted and squeezed through a smaller MTU
+#      (Maximum Transmission Unit) on the way. That cost lands on exactly the packets a
+#      deathmatch cannot afford it on. Tailscale is checked for by name because it is the
+#      one this fleet is known to run.
+#   2. A `lan_ip` that no interface on the machine actually holds. The dedicated server
+#      binds that address with `+set net_ip` and simply fails to start if it is wrong.
+#   3. WiFi. Jitter on a contended access point is worse than anything an overlay costs.
+#
+# The fourth, Quake III's LAN server browser needing a real broadcast domain, is not
+# checkable from one machine -- it is why everyone must be on one flat layer-2 segment.
 #
 # WARN-ONLY BY DEFAULT (lanparty_preflight_strict: false). A first run happens while
 # machines are still being carried into the room; failing it then would just be noise.
@@ -49,12 +60,21 @@
     # route to its own address is `dev lo` -- so testing the route would report loopback
     # and quietly miss the fact that the machine is serving the whole party over WiFi.
     # The interface holding the address is what players' packets will really arrive on.
-    lanparty_lan_dev: >-
+    #
+    # Empty when NO interface holds the address, which is a finding in its own right --
+    # hence a separate fact rather than folding the fallback in here.
+    lanparty_lan_dev_owner: >-
       {{ (ansible_facts['interfaces']
           | map('extract', ansible_facts)
           | selectattr('ipv4', 'defined')
           | selectattr('ipv4.address', 'equalto', lanparty_lan_ip)
-          | map(attribute='device') | list | first) | default(lanparty_route_dev) }}
+          | map(attribute='device') | list | first) | default('') }}
+
+- name: Preflight -- settle on the interface to report and test
+  ansible.builtin.set_fact:
+    # Fall back to the egress interface so the wireless check and the report below still
+    # say something useful on a machine whose lan_ip is wrong.
+    lanparty_lan_dev: "{{ lanparty_lan_dev_owner or lanparty_route_dev }}"
 
 - name: Preflight -- is the LAN interface wireless
   ansible.builtin.stat:
@@ -109,19 +129,24 @@
       {{
         ([]
          + (['Game traffic would leave this machine over "' ~ lanparty_route_dev ~ '", which is a '
-             ~ 'Tailscale interface. That is the overlay network, not the LAN. Fix the lan_ip '
-             ~ 'values in inventory/hosts.yml.']
+             ~ 'Tailscale interface. That is an overlay network, not the LAN. This repo does not '
+             ~ 'use one -- fix the lan_ip values in inventory/hosts.yml.']
             if 'tailscale' in lanparty_route_dev else [])
-         + (['This host lan_ip (' ~ lanparty_lan_ip ~ ') is inside 100.64.0.0/10, the tailnet '
-             ~ 'range. It must be the physical LAN address instead.']
+         + (['No interface on this machine holds its lan_ip (' ~ lanparty_lan_ip ~ '). Game '
+             ~ 'traffic would be measured against an address that is not here, and on the '
+             ~ 'dedicated server `+set net_ip` fails to bind and the service will not start. '
+             ~ 'Check `ip -4 -br addr` on this machine against inventory/hosts.yml.']
+            if lanparty_lan_dev_owner | length == 0 else [])
+         + (['This host lan_ip (' ~ lanparty_lan_ip ~ ') is inside 100.64.0.0/10, the range '
+             ~ 'Tailscale hands out. It must be the physical LAN address instead.']
             if (lanparty_lan_ip.split('.')[0] == '100'
                 and 64 <= (lanparty_lan_ip.split('.')[1] | int) <= 127) else [])
          + (['The server lan_ip (' ~ lanparty_server_lan_ip ~ ') is inside 100.64.0.0/10, the '
-             ~ 'tailnet range. Every client would connect over the overlay.']
+             ~ 'range Tailscale hands out. Every client would connect over the overlay.']
             if (lanparty_server_lan_ip.split('.')[0] == '100'
                 and 64 <= (lanparty_server_lan_ip.split('.')[1] | int) <= 127) else [])
-         + (['LAN interface "' ~ lanparty_lan_dev ~ '" is wireless. WiFi jitter is worse than '
-             ~ 'anything Tailscale would have cost -- wire this machine to the switch before '
+         + (['LAN interface "' ~ lanparty_lan_dev ~ '" is wireless. WiFi jitter is the largest '
+             ~ 'avoidable source of bad latency here -- wire this machine to the switch before '
              ~ 'playing.']
             if (lanparty_wireless.stat.exists | default(false)) else [])
          + (['No route to the server at ' ~ lanparty_server_lan_ip ~ '. Same switch, same subnet?']

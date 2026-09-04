@@ -7,10 +7,12 @@
 # ---------------------------------------------------------------------------------------
 # /etc/hosts -- a stable name for the server, pinned to its LAN address.
 #
-# WHY THIS EXISTS AND IS NOT COSMETIC. Every machine here is on a tailnet with MagicDNS,
-# so the server's hostname very likely ALREADY resolves -- to its 100.64.x.x tailnet
-# address. Anyone who types the hostname instead of the address ends up playing over the
-# overlay without noticing. A hosts entry that resolves first removes that trap.
+# WHY THIS EXISTS AND IS NOT COSMETIC. The server's hostname very likely ALREADY resolves
+# to something on these machines -- Tailscale MagicDNS hands out the 100.64.x.x address to
+# anything still running the daemon, and a router or mDNS responder may answer with an
+# address on a different interface. Anyone who types the name instead of the address then
+# plays over whatever answered, without noticing. A hosts entry that resolves first removes
+# that trap, and gives everyone one name to type: `lanparty-server`.
 #
 # blockinfile with a distinct marker, not a template: /etc/hosts is also written by
 # cloud-init, systemd, and tailscaled. Owning the whole file would fight all three.

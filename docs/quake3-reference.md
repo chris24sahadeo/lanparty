@@ -112,6 +112,10 @@ Clients need no inbound rule; they bind an ephemeral source port.
 
 ### How the LAN browser finds servers, and why an overlay breaks it
 
+This repo runs entirely on the physical LAN and never on an overlay, so none of the
+following is a live constraint -- it is written down because it is the reason for that
+choice, and because a machine here may still be running Tailscale for unrelated work.
+
 The client sends `getinfo` as an **IPv4 subnet broadcast** to 27960-27963, twice, plus an
 IPv6 multicast. Servers answer with `infoResponse`, filtered by `com_gamename`.
 

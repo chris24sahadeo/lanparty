@@ -31,6 +31,42 @@
   become: true
 
 # ---------------------------------------------------------------------------------------
+# WHAT IS ALREADY INSTALLED, ASKED FIRST.
+#
+# This runs BEFORE the search below, and the search and its assert are skipped when every
+# machine in the play already has pak0.pk3 in place. Without that ordering, a re-run on a
+# fully provisioned fleet aborts with "no game data found on the control node" the moment
+# the ORIGINAL copy is no longer where it was -- moved, deleted, an external drive
+# unplugged, or just a different $HOME because someone ran the playbook under sudo. There
+# is nothing to install in that case, and failing is the wrong answer to a question that
+# did not need asking.
+# ---------------------------------------------------------------------------------------
+- name: Quake3 -- has the game data already been unpacked
+  ansible.builtin.stat:
+    path: "{{ lanparty_quake3_basepath }}/baseq3/pak0.pk3"
+  register: lanparty_pak0
+  changed_when: false
+
+- name: Quake3 -- does any machine in this play still need the data
+  ansible.builtin.set_fact:
+    # ansible_play_hosts, not groups[...]: with --limit the play may be a subset, and a
+    # host that is not being touched must not keep the copy running for one that is.
+    lanparty_data_needed: >-
+      {{ ansible_play_hosts
+         | map('extract', hostvars, ['lanparty_pak0', 'stat', 'exists'])
+         | select('equalto', false) | list | length > 0 }}
+  run_once: true
+
+- name: Quake3 -- note that no machine needs the data pushed
+  ansible.builtin.debug:
+    msg: >-
+      pak0.pk3 is already in {{ lanparty_quake3_basepath }}/baseq3 on every machine in this
+      play. Skipping the control-node search -- the original copy does not need to still be
+      lying around for a re-run to work.
+  run_once: true
+  when: not lanparty_data_needed
+
+# ---------------------------------------------------------------------------------------
 # FINDING THE GAME DATA, WITHOUT ANYONE HAVING TO SAY WHERE IT IS.
 #
 # pak0.pk3 is retail id Software data. It is not redistributable, so it is not in this
@@ -54,7 +90,96 @@
   run_once: true
   changed_when: false
   failed_when: false
-  when: lanparty_quake3_baseq3_src | length == 0
+  when:
+    - lanparty_data_needed
+    - lanparty_quake3_baseq3_src | length == 0
+
+# ---------------------------------------------------------------------------------------
+# NOTHING LOCAL? FETCH IT FROM THE RCLONE REMOTE.
+#
+# This is what makes a brand-new control node a clone-and-run affair rather than "first,
+# find the disc". It lands in .gamedata/baseq3.zip, which is BOTH the first path the search
+# above looks at and gitignored -- so the download happens once, every later run finds it
+# locally, and the retail data still never goes near git.
+#
+# See lanparty_quake3_baseq3_rclone_src in group_vars/all.yml for why rclone rather than
+# get_url, and why this role does not install it.
+# ---------------------------------------------------------------------------------------
+- name: Quake3 -- decide whether the remote copy is needed
+  ansible.builtin.set_fact:
+    lanparty_data_fetch: >-
+      {{ lanparty_data_needed
+         and lanparty_quake3_baseq3_src | length == 0
+         and lanparty_quake3_baseq3_rclone_src | length > 0
+         and (lanparty_data_search.stdout | default('') | trim) | length == 0 }}
+  run_once: true
+
+- name: Quake3 -- is rclone installed on the control node
+  ansible.builtin.command:
+    argv: [rclone, version]
+  register: lanparty_rclone
+  delegate_to: localhost
+  run_once: true
+  changed_when: false
+  failed_when: false
+  when: lanparty_data_fetch
+
+- name: Quake3 -- explain how to set rclone up, rather than installing it
+  ansible.builtin.assert:
+    that: lanparty_rclone.rc == 0
+    fail_msg: |-
+      No game data on this machine, and rclone is not installed to fetch it.
+
+      rclone is not installed by this repo on purpose -- it is a Homebrew package here and
+      Homebrew belongs to another Ansible tree. Any of these gets you moving:
+
+        brew install rclone            then: rclone config     (add a Google Drive remote)
+        sudo apt install rclone        same
+
+      The remote this expects is {{ lanparty_quake3_baseq3_rclone_src }}, set in
+      group_vars/all.yml as lanparty_quake3_baseq3_rclone_src. Change it to match your own
+      remote name, or set it to "" and drop a copy in one of the local paths instead.
+    quiet: true
+  run_once: true
+  when: lanparty_data_fetch
+
+- name: Quake3 -- create the .gamedata directory on the control node
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/.gamedata"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  run_once: true
+  when: lanparty_data_fetch
+
+- name: Quake3 -- fetch the archive from the rclone remote
+  ansible.builtin.command:
+    # copyto, not copy: `copy` treats the destination as a directory and would land the
+    # file at .gamedata/baseq3.zip/baseq3.zip. --checksum makes a re-run compare hashes
+    # rather than sizes, so a half-finished earlier transfer is replaced instead of kept.
+    argv:
+      - rclone
+      - copyto
+      - --checksum
+      - "{{ lanparty_quake3_baseq3_rclone_src }}"
+      - "{{ playbook_dir }}/.gamedata/baseq3.zip"
+  delegate_to: localhost
+  run_once: true
+  # 637 MB over a domestic uplink. The default 30 s SSH timeout does not apply to a local
+  # command, but a slow link still needs saying out loud: this task is the long one.
+  when: lanparty_data_fetch
+
+- name: Quake3 -- look again, now that the archive is local
+  ansible.builtin.command:
+    argv:
+      - "{{ role_path }}/files/find-game-data.sh"
+      - "{{ playbook_dir }}"
+  register: lanparty_data_search
+  delegate_to: localhost
+  run_once: true
+  changed_when: false
+  failed_when: false
+  when: lanparty_data_fetch
 
 - name: Quake3 -- settle on where the game data is coming from
   ansible.builtin.set_fact:
@@ -91,8 +216,13 @@
         a mounted retail CD under /media/{{ lookup('env', 'USER') }}/
 
       Only the control node needs it. Ansible pushes it to every other machine.
+
+      Sure it is in one of those? Check that you did not run the playbook itself under
+      sudo -- that resets $HOME to /root and hides ~/Downloads. bootstrap.sh does not need
+      it; the individual tasks that do use become.
     quiet: true
   run_once: true
+  when: lanparty_data_needed
 
 - name: Quake3 -- verify the checksum, when one is pinned
   ansible.builtin.stat:
@@ -131,11 +261,6 @@
     state: directory
     mode: "0755"
   become: true
-
-- name: Quake3 -- has the game data already been unpacked
-  ansible.builtin.stat:
-    path: "{{ lanparty_quake3_basepath }}/baseq3/pak0.pk3"
-  register: lanparty_pak0
 
 - name: Quake3 -- unpack the game data from an archive
   ansible.builtin.unarchive:

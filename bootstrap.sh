@@ -64,7 +64,53 @@ fi
 # sudo actually needs one, so a --tags preflight run (which touches nothing privileged)
 # never prompts.
 BECOME_ARGS=()
-if ! sudo -n true 2>/dev/null; then
+
+# A preflight-only run is every task in roles/lan_preflight, and every one of them is a
+# probe with become: false. It genuinely needs no sudo, so do not ask for a password and
+# do not die on a missing terminal -- which is what the message below promises. Matched on
+# the arguments rather than inferred, because this is the only tag selection that is
+# entirely become-free.
+PREFLIGHT_ONLY=false
+# Initialised because `set -u` is on, and assigned at the END of each iteration so the
+# `preflight` case sees the argument BEFORE it.
+PREV_ARG=""
+for arg in "$@"; do
+  case "$arg" in
+    --tags=preflight|-t=preflight)
+      PREFLIGHT_ONLY=true
+      ;;
+    preflight)
+      if [[ "$PREV_ARG" == "--tags" || "$PREV_ARG" == "-t" ]]; then
+        PREFLIGHT_ONLY=true
+      fi
+      ;;
+  esac
+  PREV_ARG="$arg"
+done
+
+# THE PROBE MUST RUN THE WAY ANSIBLE WILL RUN SUDO, NOT THE WAY THIS SHELL WOULD.
+#
+# Ansible's sudo become plugin builds `sudo -H -S -n ...` and spawns it from a Python
+# subprocess with no controlling terminal. sudo's default timestamp_type is `tty`, so a
+# ticket is keyed to the terminal it was obtained on -- which means a plain `sudo -n true`
+# HERE can succeed off this terminal's ticket while Ansible's sudo, having no terminal,
+# still needs a password. The run then dies at the first `become: true` task with
+# "sudo: a password is required", long after this check said everything was fine.
+#
+# Warming the timestamp first (`sudo -v && ./bootstrap.sh`) makes that MORE likely, not
+# less, which is the opposite of what anyone expects.
+#
+# setsid detaches the probe from the controlling terminal, so it is asking the same
+# question Ansible will ask. Falls back to the naive probe if setsid is missing.
+sudo_works_without_a_terminal() {
+  if command -v setsid >/dev/null 2>&1; then
+    setsid sudo -n true </dev/null >/dev/null 2>&1
+  else
+    sudo -n true </dev/null >/dev/null 2>&1
+  fi
+}
+
+if [[ "$PREFLIGHT_ONLY" == false ]] && ! sudo_works_without_a_terminal; then
   # --ask-become-pass reads the password with getpass, which needs a real terminal to turn
   # echo off. Without one it silently returns an empty string and the run dies fourteen
   # tasks later with "sudo: a password is required", which does not look like a terminal
@@ -74,10 +120,11 @@ if ! sudo -n true 2>/dev/null; then
   Any of these work:
       # from an interactive shell
       ./bootstrap.sh $*
-      # or warm the sudo timestamp first, then rerun anywhere
-      sudo -v && ./bootstrap.sh $*
-      # or authenticate through a desktop dialog, no terminal needed
-      SUDO_ASKPASS=/path/to/askpass sudo -A -v && ./bootstrap.sh $*
+      # or give this user passwordless sudo for the run
+      #   sudo visudo   ->   $USER ALL=(ALL) NOPASSWD: ALL
+      # or hand the password to Ansible itself, vaulted -- the only route that does not
+      # depend on a sudo timestamp, which is scoped to a terminal this has none of
+      #   ./bootstrap.sh $* -e @secrets/become.yml --vault-password-file vault-password
   A --tags preflight run needs no sudo and works anywhere."
   fi
   log "Some tasks need sudo; you will be prompted once."

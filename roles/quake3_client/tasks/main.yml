@@ -139,8 +139,8 @@
 # The Ubuntu packages put nothing on $PATH -- the binary is /usr/lib/ioquake3/ioquake3 and
 # the multiverse `quake3` wrapper is the thing that normally provides a friendly name. We
 # are not installing that (see roles/quake3_common), so this script is the wrapper, and it
-# is better for the purpose anyway: it hard-codes the server's LAN address, so nobody can
-# absent-mindedly join over the tailnet.
+# is better for the purpose anyway: it hard-codes the server's LAN address, so nobody has
+# to type an address or pick the wrong one out of a browser list.
 # ---------------------------------------------------------------------------------------
 - name: Quake3 client -- install the launcher
   ansible.builtin.copy:
@@ -152,9 +152,9 @@
       #!/bin/sh
       # Managed by Ansible: lanparty/roles/quake3_client. Edits are overwritten.
       #
-      # Joins the dedicated server over the PHYSICAL LAN. The address below is not this
-      # machine's tailnet address and must not be replaced with one -- that is the whole
-      # point of the setup.
+      # Joins the dedicated server over the PHYSICAL LAN. The address below comes from the
+      # server's lan_ip and must stay a plain LAN address -- swapping in one handed out by
+      # a VPN or overlay is exactly the mistake this setup exists to prevent.
       set -eu
 
       SERVER="{{ lanparty_quake3_connect }}:{{ lanparty_quake3_port }}"

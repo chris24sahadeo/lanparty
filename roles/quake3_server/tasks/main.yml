@@ -77,8 +77,10 @@
       set sv_minRate 0
       set sv_maxRate 0
       // Ignore each client's `rate` cvar for clients on the local subnet and give them
-      // the full pipe. Note this test is by subnet: a client connecting over the tailnet
-      // from 100.64.0.0/10 would NOT qualify, which is one more reason not to do that.
+      // the full pipe. Note this test is by subnet, so it only fires for clients that are
+      // really on the party segment -- one more reason everyone shares one flat layer-2
+      // network. A client arriving from 100.64.0.0/10 over some leftover overlay would NOT
+      // qualify and would silently get its own clamped rate instead.
       set sv_lanForceRate 1
       set sv_floodProtect 0
 
@@ -122,10 +124,11 @@
       User={{ lanparty_quake3_server_user }}
       Group={{ lanparty_quake3_server_user }}
       WorkingDirectory={{ lanparty_quake3_server_home }}
-      # net_ip IS THE LATENCY GUARANTEE. Binding one address rather than 0.0.0.0 means
-      # the daemon does not listen on the tailscale0 interface at all, so no client can
-      # reach it over the overlay even by accident. net_ip and net_port are CVAR_LATCH,
-      # which is why they are here and not in server.cfg.
+      # net_ip IS THE LATENCY GUARANTEE. Binding one address rather than 0.0.0.0 means the
+      # daemon listens on the LAN interface and nothing else -- not on tailscale0 or any
+      # other VPN interface the machine happens to be running, so no client can reach it
+      # over an overlay even by accident. net_ip and net_port are CVAR_LATCH, which is why
+      # they are here and not in server.cfg.
       #
       # `dedicated 1` is CVAR_INIT -- command line only. 1 = LAN, no master heartbeat.
       #
@@ -184,4 +187,4 @@
   ansible.builtin.debug:
     msg: >-
       {{ game_display_name }} is serving on {{ lanparty_lan_ip }}:{{ lanparty_quake3_port }}
-      (physical LAN). Clients connect there, never to the tailnet address.
+      (physical LAN), and on no other interface.

@@ -15,6 +15,20 @@ set -u
 
 REPO="${1:-$PWD}"
 
+# EVERY SEARCH PATH BELOW HANGS OFF $HOME, so getting it wrong finds nothing and the run
+# aborts claiming the data is missing when it is sitting in ~/Downloads. That happens the
+# moment anyone runs the playbook under sudo: sudo resets HOME to /root, and root has no
+# Downloads. bootstrap.sh does not need sudo at the top level -- individual tasks become --
+# but "it asked for a password, so I ran the whole thing with sudo" is the obvious wrong
+# guess and this makes it harmless.
+if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+  SUDO_USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+  [ -n "$SUDO_USER_HOME" ] && [ -d "$SUDO_USER_HOME" ] && HOME="$SUDO_USER_HOME"
+fi
+# $USER is used by the removable-media globs below and sudo rewrites it too.
+[ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ] && USER="$SUDO_USER"
+: "${USER:=$(id -un)}"
+
 emit() { printf '%s\t%s\n' "$1" "$2"; exit 0; }
 
 # Shape 1: a zip holding baseq3/*.pk3, which is how the setup guide ships it.

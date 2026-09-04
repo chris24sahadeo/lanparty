@@ -1,12 +1,11 @@
 # lanparty
 
-Ansible for running a LAN party in an office where every machine is on a
-[Tailscale](https://tailscale.com) tailnet.
+Ansible for running a LAN party in an office, over the office LAN and nothing else.
 
-**Tailscale is the deploy plane. The game is not on it.** Ansible reaches each machine
-over its tailnet address to install things; the game server binds the machine's *physical*
-LAN address and clients connect to that. Input packets ride the office switch and never
-enter the WireGuard tunnel.
+**One address per machine, used for both jobs.** Ansible reaches each machine at its
+physical LAN address to install things, and the game server binds that same address for
+clients to connect to. Input packets ride the office switch. There is no overlay network,
+no VPN, and no second address that could be used by mistake.
 
 Game-agnostic: Quake III Arena is the first game, not the only one.
 
@@ -14,76 +13,209 @@ Game-agnostic: Quake III Arena is the first game, not the only one.
 
 ## Quick start
 
+### 1. Set up the machine you will run Ansible from
+
+Copy and paste the whole block. It ends with a working game server on this machine.
+
 ```bash
 git clone git@github.com:chris24sahadeo/lanparty.git ~/lanparty
 cd ~/lanparty
 
-# 1. List the machines. One server, N clients, two addresses each.
-$EDITOR inventory/hosts.yml
+# Put THIS machine in the inventory as both the server and a player.
+# Replace my-pc with `hostname`, and chris with your login.
+cat > inventory/hosts.yml <<'YAML'
+all:
+  vars:
+    ansible_user: chris
+    ansible_host: "{{ lan_ip | default(inventory_hostname) }}"
+  children:
+    game_server:
+      hosts:
+        my-pc:
+          ansible_connection: local
+    game_clients:
+      hosts:
+        my-pc:
+          ansible_connection: local
+YAML
 
-# 2. Check the network before installing anything. Changes nothing.
-./bootstrap.sh --tags preflight
-
-# 3. Provision everything.
-./bootstrap.sh
+./bootstrap.sh --tags preflight   # checks the network, changes nothing, needs no sudo
+./bootstrap.sh                    # installs everything; asks for your sudo password once
+q                                 # play
 ```
 
-Then on any machine: **`q`** to play. `q --menu` to change settings, `q --help` for the rest.
+That is the whole thing. You do **not** find, download, or point anything at the game
+data -- see [step 4](#4-if-it-stops-and-asks-for-rclone) for the one case that needs a
+command from you.
 
-**You do not point it at the game data.** It looks in `~/Downloads/baseq3.zip`,
-`.gamedata/` next to the repo, and any Steam, GOG or mounted-disc install, and uses the
-first copy it finds -- on the control node only, since Ansible pushes it to everyone else.
-If none of those has it, the run stops and lists exactly where to drop a copy. See
+### 2. Add another PC
+
+On the new machine:
+
+```bash
+sudo apt install -y openssh-server
+ip -4 -br addr                    # note its 192.168.x.x address
+```
+
+Back on the first machine:
+
+```bash
+cd ~/lanparty
+ssh-copy-id chris@192.168.0.51    # its address, and its login
+```
+
+Add it to `inventory/hosts.yml` under `game_clients:`, indented exactly like the existing
+host. One address, that is the whole entry:
+
+```yaml
+        someones-laptop:
+          lan_ip: 192.168.0.51
+```
+
+Then:
+
+```bash
+./bootstrap.sh --tags preflight
+./bootstrap.sh --ask-become-pass  # one password, used on every machine
+```
+
+Repeat for each PC. Everyone must be on **one flat layer-2 segment** -- same switch, same
+subnet, no VLAN between them -- or the in-game server browser finds nothing.
+
+### 3. Play
+
+On any provisioned machine:
+
+```bash
+q                 # join the server
+q --menu          # main menu, for changing settings
+q --help          # everything else
+```
+
+### 4. If it stops and asks for rclone
+
+Only happens on a machine that has no copy of the game data anywhere. `pak0.pk3` is retail
+data this repo cannot ship, so it is fetched from Google Drive instead:
+
+```bash
+brew install rclone && rclone config   # or: sudo apt install rclone && rclone config
+                                       # add a Google Drive remote named personal-gdrive
+./bootstrap.sh                         # re-run; it downloads once into .gamedata/
+```
+
+Already own the game? Nothing to do -- a Steam, GOG, mounted-disc or
+`~/Downloads/baseq3.zip` copy is found automatically and wins over the download. See
 [Game data](#game-data).
+
+### Everything else
 
 `bootstrap.sh` builds an in-tree virtualenv on first run and passes every argument through
 to `ansible-playbook`, so `--check`, `--diff`, `--limit` and `--tags` all work.
 Useful tags: `preflight`, `host`, `server`, `client`.
 
+| If | Then |
+| --- | --- |
+| a run reports `changed=0` | nothing needed doing; that is the expected second run |
+| preflight warns "interface is wireless" | plug into the switch; WiFi jitter is the worst thing you can do to this |
+| you narrow with `--limit` | include the server host too -- see [Adding a machine](#adding-a-machine) |
+| `sudo: a password is required` mid-run | re-run with `--ask-become-pass` |
+
 ---
 
-## Why not just play over Tailscale
+## Why the LAN and nothing else
 
-It would work, and it would be worse in two specific ways.
+An earlier version of this repo deployed over a [Tailscale](https://tailscale.com) tailnet
+and played over the LAN. It worked, and it was two addresses per host that must never be
+interchanged -- which is one paste away from a party that silently plays through a
+WireGuard tunnel. Running everything on the LAN removes the whole class of mistake, and
+avoids two costs that an overlay imposes on exactly the wrong traffic:
 
 1. **Encryption and MTU overhead on the packets that can least afford it.** Even when two
-   Tailscale peers find a direct path over the same switch, every packet is encrypted,
+   overlay peers find a direct path over the same switch, every packet is encrypted,
    decrypted, and fitted into a smaller MTU (Maximum Transmission Unit). That is a fine
    trade for a file copy and a bad one for a rocket jump.
 2. **The in-game LAN server browser stops working.** Quake III finds local servers by
-   sending an IPv4 subnet broadcast to UDP 27960-27963. Tailscale is a layer-3 mesh with
-   no broadcast domain, so the probe goes nowhere. You would be handing out IP addresses
-   by hand all evening.
+   sending an IPv4 subnet broadcast to UDP 27960-27963. A layer-3 mesh has no broadcast
+   domain, so the probe goes nowhere. You would be handing out IP addresses by hand all
+   evening.
 
-`roles/lan_preflight` checks, per machine, that this has actually been avoided.
+What it costs: **a machine that is not on this LAN cannot be provisioned.** Everyone has
+to be in the room and plugged in before Ansible can reach them, where before you could
+prepare a laptop from anywhere. At a party, that is not a real cost.
+
+Tailscale may still be installed on these machines for unrelated reasons -- this repo does
+not manage it either way. `roles/lan_preflight` checks, per machine, that nothing has
+quietly moved game traffic onto it.
 
 ---
 
 ## The inventory
 
-`inventory/hosts.yml` carries **two addresses per machine and they are never
-interchanged**:
+`inventory/hosts.yml` carries **one address per machine**, `lan_ip`, doing both jobs:
 
-| key | range | used for |
-| --- | --- | --- |
-| `ansible_host` | `100.64.0.0/10` (tailnet) | deployment only -- SSH, which is not latency sensitive and works before anyone is in the room |
-| `lan_ip` | e.g. `192.168.x.x` | gameplay only -- what the server binds and clients connect to |
-
-`lan_ip` is optional. Omitted, it defaults to the host's primary IPv4 address, which is
-right for any machine with one NIC (Network Interface Card). Set it explicitly on anything
-multi-homed.
+| job | how it is used |
+| --- | --- |
+| deployment | Ansible SSHes to it |
+| gameplay | the server binds it; clients connect to it |
 
 ```yaml
 game_clients:
   hosts:
     someones-laptop:
-      ansible_host: 100.64.0.2        # tailnet -- DEPLOY ONLY
-      lan_ip: 192.168.1.41            # physical LAN -- GAMEPLAY
+      lan_ip: 192.168.1.41
 ```
+
+That is the whole entry. The two are kept identical by construction rather than by
+discipline -- the inventory's group vars set
+
+```yaml
+ansible_host: "{{ lan_ip | default(inventory_hostname) }}"
+```
+
+so there is no separate deploy address to get wrong.
+
+`lan_ip` is optional. Omit it and Ansible connects to the inventory hostname instead, which
+works if that name resolves (mDNS `.local`, your router's DNS, an `/etc/hosts` entry); the
+game address then falls back to the host's primary IPv4 address, right for any machine with
+one NIC (Network Interface Card). Set `lan_ip` explicitly on anything multi-homed --
+`roles/lan_preflight` fails a machine whose `lan_ip` no interface actually holds, because
+the dedicated server binds that address and will not start otherwise.
 
 Everyone must be on **one flat layer-2 segment**. Broadcast does not cross a router or a
 VLAN boundary, so the server browser stops working the moment machines are on different
 subnets.
+
+### What each machine needs before Ansible can reach it
+
+This repo installs none of it -- see [What this repo will not touch](#what-this-repo-will-not-touch).
+
+- **`openssh-server` running and reachable on the LAN**, with the control node's public key
+  in `~/.ssh/authorized_keys`. This is the part that changed when the tailnet went away:
+  the SSH path is now the office network, so a machine that is not plugged in is a machine
+  you cannot provision.
+- **`python3`** -- stock on Ubuntu.
+- The login user in `sudo`. Set `ansible_user` per host if it differs from the group value.
+
+### Adding a machine
+
+```bash
+ssh-copy-id chris@192.168.1.41           # once per machine, from the control node
+$EDITOR inventory/hosts.yml              # add it under game_clients with its lan_ip
+./bootstrap.sh --tags preflight          # no sudo, changes nothing
+./bootstrap.sh --ask-become-pass
+```
+
+Then `q` on that machine. Two things to know about narrowing the run with `--limit`:
+
+- **Include the server host.** The client and host roles read the server's address out of
+  `hostvars`, and if `lan_ip` is not set explicitly there they fall back to its gathered
+  facts -- which only exist for hosts in the play. `--limit new-pc,<server>` is safe;
+  `--limit new-pc` alone can fail on that lookup. Re-running against an already-provisioned
+  server is idempotent and reports `changed=0`.
+- **`--ask-become-pass` sends one password to every host.** `bootstrap.sh` only adds the
+  flag when the *control node's* own sudo needs a password, so if yours is already warm the
+  remote `apt` task fails instead. Pass it yourself, and if the new machine's password
+  differs, give that host passwordless sudo or a vaulted `ansible_become_password`.
 
 ---
 
@@ -93,7 +225,8 @@ subnets.
 `.gitignore` blocks `*.pk3` and `baseq3.zip` so it cannot be committed by accident.
 
 **Nothing needs configuring.** The control node is searched, in this order, and the first
-hit wins:
+hit wins -- and if none of them has it, it is downloaded from Google Drive. See
+[If the control node has no copy at all](#if-the-control-node-has-no-copy-at-all).
 
 | | |
 | --- | --- |
@@ -113,6 +246,43 @@ Override the search with `lanparty_quake3_baseq3_src`. Enforce a specific archiv
 `lanparty_quake3_baseq3_sha256`, empty by default because several legal copies exist and
 a checksum that rejects a good one is worse than no checksum.
 
+### If the control node has no copy at all
+
+A brand-new machine finds nothing above, so it fetches the archive with **rclone** from
+`lanparty_quake3_baseq3_rclone_src` (`group_vars/all.yml`), default
+`personal-gdrive:lanparty/baseq3.zip`. It lands in `.gamedata/baseq3.zip`, which is both
+the first path the search looks at and gitignored -- so it downloads once, every later run
+finds it locally, and the retail data still never goes near git.
+
+Setting up a new control node is therefore:
+
+```bash
+brew install rclone && rclone config     # add your Google Drive remote, once per machine
+git clone git@github.com:chris24sahadeo/lanparty.git ~/lanparty
+cd ~/lanparty && ./bootstrap.sh
+```
+
+Three things worth knowing:
+
+- **This repo does not install rclone.** It is a Homebrew package on this workstation and
+  Homebrew belongs to layer 2 -- see [What this repo will not touch](#what-this-repo-will-not-touch).
+  A control node without it gets told how to set it up and the run stops there.
+- **The remote name is per-machine.** It lives in `~/.config/rclone/rclone.conf`, which this
+  repo does not manage either. Change `lanparty_quake3_baseq3_rclone_src` to match your own
+  remote, or set it to `""` to turn the fallback off.
+- **rclone, not `get_url`, for a specific reason.** Google Drive does not serve a 637 MB
+  file over plain HTTP -- anything past roughly 100 MB gets an HTML virus-scan interstitial
+  instead of the bytes. `get_url` would write that HTML to `.gamedata/baseq3.zip` and the
+  failure would surface much later as an unzip error that says nothing about the cause.
+  rclone handles the interstitial, resumes a broken transfer, and verifies the result
+  against Drive's own MD5 (Message Digest 5).
+
+The data itself is still **not** in this repo and will not be: it is retail id Software
+data with no redistribution licence, this repo is public, `pak0.pk3` is 479 MB against
+GitHub's 100 MB file limit, and Git LFS's free tier (1 GB storage, 1 GB bandwidth a month)
+is about one clone. Drive holds one private copy; Ansible fetches it to one control node
+and pushes it to everyone else.
+
 ---
 
 ## How the LAN guarantee is actually enforced
@@ -122,15 +292,16 @@ traffic stays local is not worth anything.
 
 | # | Mechanism | Where | Verify |
 | --- | --- | --- | --- |
-| 1 | Server binds one address, so it does not listen on `tailscale0` at all | `+set net_ip` in the systemd unit | `ss -lunp \| grep 27960` shows the LAN address, not `0.0.0.0` |
+| 1 | Server binds one address, so it listens on the LAN interface and no other -- not on `tailscale0` or any other VPN interface the machine runs | `+set net_ip` in the systemd unit | `ss -lunp \| grep 27960` shows the LAN address, not `0.0.0.0` |
 | 2 | `dedicated 1` (LAN), never `2` (public) -- `1` never sends a master-server heartbeat | systemd unit; it is `CVAR_INIT`, so command line only | `ss -tunp \| grep ioq3ded` shows no public flow |
 | 3 | `sv_master1..5` blanked and `sv_strictAuth 0` | `server.cfg` | without `sv_strictAuth 0` the server calls `authorize.quake3arena.com` on every join and stalls with no internet |
 | 4 | Clients launch with `+connect <server lan_ip>` | `/usr/local/bin/lanparty-quake3` | read the script |
-| 5 | `/etc/hosts` pins `lanparty-server` to the LAN address | `roles/game_host` | stops MagicDNS resolving the hostname to the tailnet address |
+| 5 | `/etc/hosts` pins `lanparty-server` to the LAN address | `roles/game_host` | stops Tailscale MagicDNS, mDNS or a router's DNS answering the name with some other address |
 
 `roles/lan_preflight` re-checks 1-4 from each machine's point of view: which interface the
-traffic would leave on, whether that interface is wireless, whether either address is in
-the tailnet range, and the worst round trip out of 20 pings.
+traffic would leave on, whether any interface actually holds the machine's `lan_ip`,
+whether that interface is wireless, whether either address is in the `100.64.0.0/10` range
+an overlay would hand out, and the worst round trip out of 20 pings.
 
 It **warns and continues** by default, because a first run happens while machines are
 still being carried in. Set `lanparty_preflight_strict: true` on party morning and every
@@ -203,6 +374,11 @@ Hands off, because something else already owns them: Tailscale itself, `openssh-
 and `authorized_keys`, Docker, Homebrew, anything in `~/.local/bin`, MIME associations and
 `.desktop` defaults, `~/.claude`, chezmoi-managed dotfiles. No apt source or PPA is added
 by anything here.
+
+Tailscale stays on that list even though the party no longer uses it. This repo dropping
+the tailnet as its deploy plane is not a reason to uninstall a daemon another tree
+installed for its own purposes -- `roles/lan_preflight` simply checks that it is not in the
+game's path.
 
 **Firewall policy: open ports on a firewall that is already running, never turn one on.**
 Enabling ufw on a machine whose owner did not choose it is a good way to break their
