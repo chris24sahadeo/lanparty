@@ -1,0 +1,123 @@
+---
+# SPOT CHECK THE LAN, ACROSS EVERY MACHINE IN THE INVENTORY.
+#
+# roles/lan_preflight answers "is gameplay traffic staying on the LAN" -- a yes/no about
+# routing, run as part of provisioning. This answers the question you have the moment
+# preflight reports a round trip that cannot be right: "and is that path any good?"
+#
+# Nothing here changes anything, and nothing needs sudo. Every task is a probe.
+
+- name: LAN check -- identify the dedicated server
+  ansible.builtin.set_fact:
+    lanparty_check_server: "{{ groups['game_server'][0] }}"
+    lanparty_check_server_ip: >-
+      {{ hostvars[groups['game_server'][0]]['lan_ip']
+         | default(hostvars[groups['game_server'][0]]['ansible_facts']['default_ipv4']['address']) }}
+
+- name: LAN check -- read the physical state of the play interface
+  # `script` AND NOT `command`. role_path is a path on the CONTROL NODE, so a command task
+  # naming it runs on a remote machine that has no such file -- which, with
+  # failed_when: false, showed up as a row of "?" rather than as an error. `script` copies
+  # the file to the target first, which is the whole point of the module.
+  #
+  # (roles/quake3_common uses `command` for its own probe on purpose: that one is
+  # delegate_to: localhost and is meant to run on the control node only.)
+  ansible.builtin.script:
+    cmd: "{{ role_path }}/files/probe-link.sh {{ lanparty_lan_ip | quote }}"
+  register: lanparty_link
+  changed_when: false
+  failed_when: false
+
+- name: LAN check -- say so when the probe could not run at all
+  ansible.builtin.debug:
+    msg: >-
+      Could not read the link state on {{ inventory_hostname }}:
+      {{ (lanparty_link.stderr | default('') | trim) or 'no output' }}.
+      Its row below will show "?" for everything the probe would have filled in.
+  when: (lanparty_link.stdout | default('') | trim) | length == 0
+
+- name: LAN check -- turn the probe output into facts
+  ansible.builtin.set_fact:
+    # The probe prints JSON so there is no separator to lose in translation -- see the note
+    # in probe-link.sh. default() covers a probe that could not run at all.
+    lanparty_link_facts: >-
+      {{ lanparty_link.stdout | default('') | trim | from_json
+         if (lanparty_link.stdout | default('') | trim) | length > 0
+         else {} }}
+
+# ---------------------------------------------------------------------------------------
+# Latency AND loss, from every machine to the server.
+#
+# 50 packets at 20 Hz: two and a half seconds, enough that a 2% loss rate shows up as a
+# number rather than as luck. Loss is the field preflight throws away, and it is what
+# separates "the link is slow" from "the link is retransmitting", which have different
+# causes and different fixes.
+# ---------------------------------------------------------------------------------------
+- name: LAN check -- ping the server
+  ansible.builtin.command:
+    argv: [ping, -q, -c, "50", -i, "0.05", -W, "1", "{{ lanparty_check_server_ip }}"]
+  register: lanparty_ping
+  changed_when: false
+  failed_when: false
+  when: inventory_hostname != lanparty_check_server
+
+- name: LAN check -- extract loss and round trip
+  ansible.builtin.set_fact:
+    # SINGLE backslashes: this is a folded scalar, where YAML leaves a backslash alone.
+    # regex_findall rather than regex_search so a missing summary line yields [] instead of
+    # raising -- see the long note in roles/lan_preflight/tasks/main.yml.
+    lanparty_loss: >-
+      {{ (lanparty_ping.stdout | default('') | regex_findall('([\d.]+)% packet loss')
+          | first | default('?')) }}
+    lanparty_rtt_avg: >-
+      {{ (lanparty_ping.stdout | default('') | regex_findall('=\s*[\d.]+/([\d.]+)/')
+          | first | default('?')) }}
+    lanparty_rtt_max: >-
+      {{ (lanparty_ping.stdout | default('') | regex_findall('=\s*[\d.]+/[\d.]+/([\d.]+)/')
+          | first | default('?')) }}
+
+- name: LAN check -- build this machine's row
+  ansible.builtin.set_fact:
+    # One format string, used for the header too, so the columns cannot drift apart.
+    # 16 for the interface: predictable names like enx9cbf0d014a7e are 15 characters and
+    # overflowed a narrower column, shifting every field after it out of alignment.
+    lanparty_check_fmt: "%-16s %-16s %-16s %-6s %-8s %-7s %-5s %-6s %-8s %-8s"
+    lanparty_check_row: >-
+      {{ "%-16s %-16s %-16s %-6s %-8s %-7s %-5s %-6s %-8s %-8s"
+         | format(inventory_hostname[:16],
+                  lanparty_lan_ip,
+                  lanparty_link_facts.dev | default('?'),
+                  lanparty_link_facts.media | default('?'),
+                  (lanparty_link_facts.speed | default('?')) ~ ' Mb'
+                    if (lanparty_link_facts.speed | default('?')) not in ['?', '-1']
+                    else '?',
+                  lanparty_link_facts.duplex | default('?'),
+                  lanparty_link_facts.mtu | default('?'),
+                  (lanparty_loss ~ '%') if lanparty_loss != '?' else '-',
+                  lanparty_rtt_avg if lanparty_rtt_avg != '?' else '-',
+                  lanparty_rtt_max if lanparty_rtt_max != '?' else '-') }}
+
+# ---------------------------------------------------------------------------------------
+# One table for the whole party, printed once, rather than a block per machine. The point
+# of a spot check is comparing machines to each other -- the odd one out is the answer.
+# ---------------------------------------------------------------------------------------
+- name: LAN check -- report
+  ansible.builtin.debug:
+    msg: >-
+      {{ [
+           '',
+           lanparty_check_fmt | format('machine', 'address', 'interface', 'media', 'speed',
+                                       'duplex', 'mtu', 'loss', 'avg ms', 'worst ms'),
+           lanparty_check_fmt | format('-' * 16, '-' * 16, '-' * 16, '-' * 6, '-' * 8,
+                                       '-' * 7, '-' * 5, '-' * 6, '-' * 8, '-' * 8)
+         ]
+         + (ansible_play_hosts | map('extract', hostvars)
+            | map(attribute='lanparty_check_row') | list)
+         + ['',
+            'Budget: ' ~ lanparty_max_rtt_ms ~ ' ms worst case. Server is '
+              ~ lanparty_check_server ~ ' at ' ~ lanparty_check_server_ip ~ '.',
+            'A wired 1GbE switch gives well under 1 ms and 0% loss. Anything else means the',
+            'row that stands out is the machine to look at: wifi, a link negotiated below',
+            '1000 Mb, half duplex, or loss above 0 all produce latency no cvar can fix.']
+      }}
+  run_once: true

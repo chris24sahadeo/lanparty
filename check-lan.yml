@@ -1,0 +1,20 @@
+---
+# Spot check the LAN across every machine in the inventory. Changes nothing, needs no sudo.
+#
+# Deliberately NOT a tag on site.yml. That playbook provisions; this one diagnoses, and the
+# question it answers ("why is the round trip 200 ms when we are all on one switch?") is
+# one you ask between provisioning runs, not during them.
+#
+# Run it with ./check-lan.sh, which supplies the in-tree virtualenv and ANSIBLE_CONFIG.
+- name: "Spot check the LAN"
+  hosts: game_server:game_clients
+  gather_facts: true
+  become: false
+  tasks:
+    - name: Load the game manifest
+      ansible.builtin.include_vars:
+        file: "games/{{ lanparty_game }}.yml"
+
+    - name: Check every machine
+      ansible.builtin.include_role:
+        name: lan_check
